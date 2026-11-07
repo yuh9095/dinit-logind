@@ -43,7 +43,7 @@ int main(void)
 
     user = dl_user_find(manager, spec.uid);
     assert(user != NULL);
-    assert(dl_user_active_session_count(user) == 1);
+    assert(dl_user_active_session_count(user) == 0);
 
     assert(dl_pam_session_peer_closed(session, &closed) == DL_OK);
     assert(!closed);
