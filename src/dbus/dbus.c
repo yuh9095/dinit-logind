@@ -20,10 +20,10 @@
 
 #ifndef DL_POLKIT_AUTH_TIMEOUT_USEC
 #define DL_POLKIT_AUTH_TIMEOUT_USEC (30ULL * 1000ULL * 1000ULL)
+#endif
 #ifndef DL_SESSION_TERMINATE_TIMEOUT_SEC
 /* systemd v262.2 default-timeout-sec is 90 seconds. */
 #define DL_SESSION_TERMINATE_TIMEOUT_SEC 90
-#endif
 #endif
 
 enum session_operation {
@@ -62,6 +62,10 @@ struct dbus_context {
 
 static int session_from_message(sd_bus_message *m, struct dbus_context *ctx,
                                 dl_session **ret_session);
+
+static struct pending_termination *pending_termination_find(
+    struct dbus_context *ctx, const char *session_id);
+static void pending_termination_release(struct pending_termination *pending);
 
 static void pending_authorization_remove(struct pending_authorization *pending)
 {
