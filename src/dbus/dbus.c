@@ -486,6 +486,45 @@ static const sd_bus_vtable seat_vtable[] = {
     SD_BUS_VTABLE_END
 };
 
+
+static int fallback_object_find(sd_bus *bus, const char *path,
+                                const char *interface, void *userdata,
+                                void **ret_found, sd_bus_error *error)
+{
+    struct dbus_context *ctx = userdata;
+    char id[DL_METADATA_MAX];
+    int r = 0;
+    (void)bus;
+    (void)error;
+    if (strcmp(interface, "org.freedesktop.login1.Session") == 0) {
+        r = decode_component(path, DL_LOGIN1_PATH "/session/", id, sizeof(id));
+        if (r >= 0 && dl_session_find(ctx->manager, id) != NULL) {
+            *ret_found = userdata;
+            return 1;
+        }
+    } else if (strcmp(interface, "org.freedesktop.login1.User") == 0) {
+        char *end = NULL;
+        unsigned long uid;
+        r = decode_component(path, DL_LOGIN1_PATH "/user/", id, sizeof(id));
+        if (r >= 0) {
+            errno = 0;
+            uid = strtoul(id, &end, 10);
+            if (!errno && end != id && *end == '\0' && uid <= UINT32_MAX &&
+                dl_user_find(ctx->manager, (uint32_t)uid) != NULL) {
+                *ret_found = userdata;
+                return 1;
+            }
+        }
+    } else if (strcmp(interface, "org.freedesktop.login1.Seat") == 0) {
+        r = decode_component(path, DL_LOGIN1_PATH "/seat/", id, sizeof(id));
+        if (r >= 0 && dl_seat_find(ctx->manager, id) != NULL) {
+            *ret_found = userdata;
+            return 1;
+        }
+    }
+    return r < 0 ? r : 0;
+}
+
 static const sd_bus_vtable manager_vtable[] = {
     SD_BUS_VTABLE_START(0),
     SD_BUS_METHOD("GetSession", "s", "o", method_get_session, SD_BUS_VTABLE_UNPRIVILEGED),
@@ -514,7 +553,7 @@ int dl_dbus_open(dl_dbus *dbus, dl_manager *manager)
     if (r < 0) { sd_bus_unref(dbus->bus); dbus->bus = NULL; free(ctx); return r; }
     r = sd_bus_add_fallback_vtable(dbus->bus, &dbus->session_slot,
                                    DL_LOGIN1_PATH "/session", "org.freedesktop.login1.Session",
-                                   session_vtable, ctx);
+                                   session_vtable, fallback_object_find, ctx);
     if (r < 0) {
         sd_bus_slot_unref(dbus->seat_slot);
         sd_bus_slot_unref(dbus->user_slot);
@@ -524,7 +563,7 @@ int dl_dbus_open(dl_dbus *dbus, dl_manager *manager)
     }
     r = sd_bus_add_fallback_vtable(dbus->bus, &dbus->user_slot,
                                    DL_LOGIN1_PATH "/user", "org.freedesktop.login1.User",
-                                   user_vtable, ctx);
+                                   user_vtable, fallback_object_find, ctx);
     if (r < 0) {
         sd_bus_slot_unref(dbus->session_slot);
         sd_bus_slot_unref(dbus->manager_slot);
@@ -532,7 +571,7 @@ int dl_dbus_open(dl_dbus *dbus, dl_manager *manager)
     }
     r = sd_bus_add_fallback_vtable(dbus->bus, &dbus->seat_slot,
                                    DL_LOGIN1_PATH "/seat", "org.freedesktop.login1.Seat",
-                                   seat_vtable, ctx);
+                                   seat_vtable, fallback_object_find, ctx);
     if (r < 0) {
         sd_bus_slot_unref(dbus->user_slot);
         sd_bus_slot_unref(dbus->session_slot);
