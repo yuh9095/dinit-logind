@@ -226,9 +226,10 @@ static int decode_component(const char *path, const char *prefix,
 
 static int path_for_user(uint32_t uid, char *path, size_t size)
 {
-    char id[32];
-    (void)snprintf(id, sizeof(id), "%u", (unsigned int)uid);
-    return make_object_path("user", id, path, size);
+    int n = snprintf(path, size, DL_LOGIN1_PATH "/user/_%u",
+                     (unsigned int)uid);
+    if (n < 0) return -EINVAL;
+    return (size_t)n >= size ? -ENAMETOOLONG : 0;
 }
 
 static int property_unknown(sd_bus_error *error, const char *name)
@@ -321,7 +322,8 @@ static int user_property(sd_bus *bus, const char *path, const char *interface,
                          void *userdata, sd_bus_error *error)
 {
     struct dbus_context *ctx = userdata;
-    char id[32], *end = NULL, name[256], object[256];
+    const char *uid_text;
+    char *end = NULL, name[256], object[256];
     unsigned long parsed;
     const dl_user *user;
     struct passwd pwd, *result = NULL;
@@ -329,11 +331,15 @@ static int user_property(sd_bus *bus, const char *path, const char *interface,
     size_t i;
     int r;
     (void)bus; (void)interface;
-    r = decode_component(path, DL_LOGIN1_PATH "/user/", id, sizeof(id));
-    if (r < 0) return property_unknown(error, property);
+    if (strncmp(path, DL_LOGIN1_PATH "/user/_",
+                strlen(DL_LOGIN1_PATH "/user/_")) != 0)
+        return property_unknown(error, property);
+    uid_text = path + strlen(DL_LOGIN1_PATH "/user/_");
+    if (*uid_text == '\0' || strchr(uid_text, '/') != NULL)
+        return property_unknown(error, property);
     errno = 0;
-    parsed = strtoul(id, &end, 10);
-    if (errno || end == id || *end || parsed > UINT32_MAX)
+    parsed = strtoul(uid_text, &end, 10);
+    if (errno || end == uid_text || *end || parsed > UINT32_MAX)
         return property_unknown(error, property);
     user = dl_user_find(ctx->manager, (uint32_t)parsed);
     if (!user) return sd_bus_error_set_const(error, "org.freedesktop.login1.NoSuchUser",
@@ -509,13 +515,17 @@ static int fallback_object_find(sd_bus *bus, const char *path,
             return 1;
         }
     } else if (strcmp(interface, "org.freedesktop.login1.User") == 0) {
+        const char *uid_text;
         char *end = NULL;
         unsigned long uid;
-        r = decode_component(path, DL_LOGIN1_PATH "/user/", id, sizeof(id));
-        if (r >= 0) {
+        if (strncmp(path, DL_LOGIN1_PATH "/user/_",
+                    strlen(DL_LOGIN1_PATH "/user/_")) == 0) {
+            uid_text = path + strlen(DL_LOGIN1_PATH "/user/_");
+            if (*uid_text == '\0' || strchr(uid_text, '/') != NULL)
+                return 0;
             errno = 0;
-            uid = strtoul(id, &end, 10);
-            if (!errno && end != id && *end == '\0' && uid <= UINT32_MAX &&
+            uid = strtoul(uid_text, &end, 10);
+            if (!errno && end != uid_text && *end == '\0' && uid <= UINT32_MAX &&
                 dl_user_find(ctx->manager, (uint32_t)uid) != NULL) {
                 *ret_found = userdata;
                 return 1;

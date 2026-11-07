@@ -188,6 +188,8 @@ int main(void)
     if (r < 0 || sd_bus_message_read(reply, "o", &returned_path) < 0)
         goto stop_server;
     (void)snprintf(user_path, sizeof(user_path), "%s", returned_path);
+    if (strncmp(user_path, LOGIN1_PATH "/user/_", strlen(LOGIN1_PATH "/user/_")) != 0)
+        goto stop_server;
     sd_bus_message_unref(reply);
     reply = NULL;
     r = sd_bus_call_method(client, LOGIN1_NAME, user_path,
