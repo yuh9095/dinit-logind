@@ -33,8 +33,9 @@ static int properties_changed_count;
 static int lock_signal_count;
 static int unlock_signal_count;
 
-static int fake_polkit_allow = 1;
-static unsigned int fake_polkit_calls;
+static atomic_int fake_polkit_allow = 1;
+static atomic_int fake_polkit_challenge = 0;
+static atomic_uint fake_polkit_calls;
 
 static int fake_polkit_check(sd_bus_message *message, void *userdata,
                              sd_bus_error *error)
@@ -43,9 +44,10 @@ static int fake_polkit_check(sd_bus_message *message, void *userdata,
     int r;
     (void)userdata;
     (void)error;
-    ++fake_polkit_calls;
+    atomic_fetch_add(&fake_polkit_calls, 1);
     r = sd_bus_message_new_method_return(message, &reply);
-    if (r >= 0) r = sd_bus_message_append(reply, "bb", fake_polkit_allow, 0);
+    if (r >= 0) r = sd_bus_message_append(reply, "bb",
+        atomic_load(&fake_polkit_allow), atomic_load(&fake_polkit_challenge));
     if (r >= 0) r = sd_bus_message_open_container(reply, 'a', "{ss}");
     if (r >= 0) r = sd_bus_message_close_container(reply);
     if (r >= 0) r = sd_bus_send(sd_bus_message_get_bus(message), reply, NULL);
@@ -103,6 +105,29 @@ static void *server_thread(void *userdata)
     return NULL;
 }
 
+static void *authority_thread_main(void *userdata)
+{
+    struct authority_state *state = userdata;
+    struct pollfd pfd;
+    while (!atomic_load(&state->stop)) {
+        int r = sd_bus_process(state->bus, NULL);
+        if (r < 0) {
+            atomic_store(&state->failed, true);
+            break;
+        }
+        if (r > 0) continue;
+        pfd.fd = sd_bus_get_fd(state->bus);
+        pfd.events = (short)sd_bus_get_events(state->bus);
+        pfd.revents = 0;
+        if (pfd.fd < 0 || pfd.events < 0) {
+            atomic_store(&state->failed, true);
+            break;
+        }
+        (void)poll(&pfd, 1, 10);
+    }
+    return NULL;
+}
+
 static int pump_until(sd_bus *bus, volatile int *value, int expected)
 {
     unsigned int i;
@@ -140,7 +165,9 @@ int main(void)
     dl_session_spec spec = {0};
     dl_session *session = NULL;
     struct server_state server = {0};
-    pthread_t thread;
+    struct authority_state authority = {0};
+    pthread_t thread, authority_thread;
+    int authority_started = 0;
     sd_bus *client = NULL;
     sd_bus_slot *new_slot = NULL, *removed_slot = NULL, *changed_slot = NULL;
     sd_bus_slot *lock_slot = NULL, *unlock_slot = NULL;
@@ -177,6 +204,22 @@ int main(void)
     if (r < 0) goto finish;
     r = sd_bus_request_name(client, "org.freedesktop.PolicyKit1", 0);
     if (r < 0) goto finish;
+    /* The authority uses its own connection so it can answer while the test
+     * client is synchronously waiting for login1 method replies. */
+    sd_bus_slot_unref(polkit_slot);
+    polkit_slot = NULL;
+    sd_bus_release_name(client, "org.freedesktop.PolicyKit1");
+    if (open_client(&authority.bus, address) < 0) goto finish;
+    r = sd_bus_add_object_vtable(authority.bus, &polkit_slot,
+        "/org/freedesktop/PolicyKit1/Authority",
+        "org.freedesktop.PolicyKit1.Authority", fake_polkit_vtable, NULL);
+    if (r < 0) goto finish;
+    r = sd_bus_request_name(authority.bus, "org.freedesktop.PolicyKit1", 0);
+    if (r < 0) goto finish;
+    authority.bus = sd_bus_ref(authority.bus);
+    if (pthread_create(&authority_thread, NULL, authority_thread_main,
+                       &authority) != 0) goto finish;
+    authority_started = 1;
 
     stage = 3;
     r = sd_bus_add_match(client, &new_slot,
@@ -332,7 +375,7 @@ int main(void)
     reply = NULL;
 
     stage = 13;
-    fake_polkit_allow = 0;
+    atomic_store(&fake_polkit_allow, 0);
     r = sd_bus_call_method(client, LOGIN1_NAME, object_path, SESSION_IFACE,
                            "Activate", &error, &reply, "");
     if (r >= 0 || !sd_bus_error_has_name(&error,
@@ -341,7 +384,17 @@ int main(void)
     sd_bus_error_free(&error);
     sd_bus_message_unref(reply);
     reply = NULL;
-    fake_polkit_allow = 1;
+    atomic_store(&fake_polkit_challenge, 1);
+    r = sd_bus_call_method(client, LOGIN1_NAME, object_path, SESSION_IFACE,
+                           "Activate", &error, &reply, "");
+    if (r >= 0 || !sd_bus_error_has_name(&error,
+            "org.freedesktop.DBus.Error.AccessDenied"))
+        goto stop_server;
+    sd_bus_error_free(&error);
+    sd_bus_message_unref(reply);
+    reply = NULL;
+    atomic_store(&fake_polkit_challenge, 0);
+    atomic_store(&fake_polkit_allow, 1);
     r = sd_bus_call_method(client, LOGIN1_NAME, object_path, SESSION_IFACE,
                            "Activate", &error, &reply, "");
     if (r < 0) goto stop_server;
@@ -497,6 +550,13 @@ stop_server:
     pthread_mutex_destroy(&server.lock);
 
 finish:
+    if (authority_started) {
+        atomic_store(&authority.stop, true);
+        pthread_join(authority_thread, NULL);
+        if (atomic_load(&authority.failed)) result = 1;
+    }
+    sd_bus_slot_unref(polkit_slot);
+    sd_bus_unref(authority.bus);
     sd_bus_message_unref(reply);
     sd_bus_error_free(&error);
     sd_bus_slot_unref(polkit_slot);
