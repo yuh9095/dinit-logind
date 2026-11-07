@@ -8,6 +8,7 @@
 
 typedef struct {
     uint32_t allowed_peer_uid;
+    uint32_t session_terminate_timeout_sec;
 } dl_daemon_config;
 
 void dl_daemon_config_defaults(dl_daemon_config *config);
