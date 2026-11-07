@@ -25,15 +25,12 @@
 
 #define DL_PAM_DATA_KEY "dinit-logind-session"
 
-struct pam_session_data {
-    int fd;
-};
+struct pam_session_data { int fd; };
 
 static void session_cleanup(pam_handle_t *pamh, void *data, int status)
 {
     struct pam_session_data *session = data;
-    (void)pamh;
-    (void)status;
+    (void)pamh; (void)status;
     if (session == NULL) return;
     if (session->fd >= 0) (void)close(session->fd);
     free(session);
@@ -42,10 +39,7 @@ static void session_cleanup(pam_handle_t *pamh, void *data, int status)
 static int copy_item(char dst[DL_PAM_FIELD_MAX], const char *src)
 {
     size_t length;
-    if (src == NULL) {
-        dst[0] = '\0';
-        return PAM_SUCCESS;
-    }
+    if (src == NULL) { dst[0] = '\0'; return PAM_SUCCESS; }
     length = strnlen(src, DL_PAM_FIELD_MAX);
     if (length >= DL_PAM_FIELD_MAX) return PAM_SERVICE_ERR;
     memcpy(dst, src, length);
@@ -55,8 +49,7 @@ static int copy_item(char dst[DL_PAM_FIELD_MAX], const char *src)
 
 static int lookup_uid(const char *name, uint32_t *uid)
 {
-    struct passwd pwd;
-    struct passwd *result = NULL;
+    struct passwd pwd, *result = NULL;
     long suggested = sysconf(_SC_GETPW_R_SIZE_MAX);
     size_t size = suggested > 0 && suggested < 1024 * 1024
                       ? (size_t)suggested : 16384;
@@ -64,7 +57,7 @@ static int lookup_uid(const char *name, uint32_t *uid)
     int error;
     if (buffer == NULL) return PAM_BUF_ERR;
     error = getpwnam_r(name, &pwd, buffer, size, &result);
-    if (error != 0 || result == NULL || (uintmax_t)pwd.pw_uid > UINT32_MAX) {
+    if (error != 0 || result == NULL) {
         free(buffer);
         return PAM_USER_UNKNOWN;
     }
@@ -84,8 +77,7 @@ static int connect_daemon(void)
     address.sun_family = AF_UNIX;
     memcpy(address.sun_path, DL_PAM_SOCKET_PATH, strlen(DL_PAM_SOCKET_PATH) + 1);
     if (connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
-        (void)close(fd);
-        return -1;
+        (void)close(fd); return -1;
     }
     return fd;
 }
@@ -101,12 +93,11 @@ PAM_EXTERN int pam_sm_open_session(pam_handle_t *pamh, int flags,
     uint32_t uid;
     int fd, status;
     size_t sent = 0;
-    (void)flags;
-    (void)argc;
-    (void)argv;
+    (void)flags; (void)argc; (void)argv;
 
     status = pam_get_user(pamh, &user, NULL);
-    if (status != PAM_SUCCESS || user == NULL) return status == PAM_SUCCESS ? PAM_USER_UNKNOWN : status;
+    if (status != PAM_SUCCESS || user == NULL)
+        return status == PAM_SUCCESS ? PAM_USER_UNKNOWN : status;
     status = lookup_uid(user, &uid);
     if (status != PAM_SUCCESS) return status;
 
@@ -140,24 +131,15 @@ PAM_EXTERN int pam_sm_open_session(pam_handle_t *pamh, int flags,
         ssize_t n = send(fd, (const char *)&request + sent,
                          sizeof(request) - sent, MSG_NOSIGNAL);
         if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) {
-            (void)close(fd);
-            return PAM_SESSION_ERR;
-        }
+        if (n <= 0) { (void)close(fd); return PAM_SESSION_ERR; }
         sent += (size_t)n;
     }
 
     session = calloc(1, sizeof(*session));
-    if (session == NULL) {
-        (void)close(fd);
-        return PAM_BUF_ERR;
-    }
+    if (session == NULL) { (void)close(fd); return PAM_BUF_ERR; }
     session->fd = fd;
     status = pam_set_data(pamh, DL_PAM_DATA_KEY, session, session_cleanup);
-    if (status != PAM_SUCCESS) {
-        session_cleanup(pamh, session, status);
-        return status;
-    }
+    if (status != PAM_SUCCESS) { session_cleanup(pamh, session, status); return status; }
     return PAM_SUCCESS;
 }
 
@@ -167,9 +149,7 @@ PAM_EXTERN int pam_sm_close_session(pam_handle_t *pamh, int flags,
     const void *data = NULL;
     struct pam_session_data *session;
     int status;
-    (void)flags;
-    (void)argc;
-    (void)argv;
+    (void)flags; (void)argc; (void)argv;
     status = pam_get_data(pamh, DL_PAM_DATA_KEY, &data);
     if (status == PAM_NO_MODULE_DATA) return PAM_SUCCESS;
     if (status != PAM_SUCCESS) return status;

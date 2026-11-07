@@ -37,3 +37,13 @@ pam_session_test = executable(
 )
 
 test('PAM session socket lifetime', pam_session_test)
+
+pam_ingress_test = executable(
+  'test-pam-ingress',
+  'test_pam_ingress.c',
+  include_directories: include_directories('../../src/core', '../../src/platform/linux'),
+  link_with: [core_lib, linux_identity_lib, linux_peer_credentials_lib, linux_pam_session_lib, linux_pam_ingress_lib],
+  install: false,
+)
+
+test('PAM ingress protocol and lifecycle', pam_ingress_test)

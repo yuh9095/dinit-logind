@@ -1,25 +1,31 @@
-# PAM socket protocol v1
+# PAM socket protocol v1 and daemon ingress
 
-The PAM module connects to the daemon's Unix stream socket at
-`/run/dinit-logind/pam.sock` (compile-time override: `DL_PAM_SOCKET_PATH`).
-It sends exactly one fixed-size `dl_pam_open_request` record and keeps the
-connection open for the lifetime of the PAM session. EOF/HUP is the release
-signal. The daemon must reject truncated records, extra bytes, unsupported
-versions, invalid magic/size, unterminated strings, and unknown flag bits.
+The PAM module connects to `/run/dinit-logind/pam.sock` and sends exactly
+one fixed-size `dl_pam_open_request`. The connection remains open for the
+PAM session lifetime; EOF/HUP releases the session.
 
-The request carries the target account UID resolved through NSS by the PAM
-module, plus PAM service/TTY/remote metadata and optional display/session
-environment values. This UID is not the Unix socket peer UID: a privileged
-PAM stack commonly opens sessions for another account. The daemon must
-authorize the peer independently (normally a root-owned, root-only socket
-and a root peer), and must independently validate the requested UID and
-account using its own NSS/policy path. Never treat the payload UID or metadata
-as proof of peer identity.
+The daemon ingress accepts an already-listening AF_UNIX stream socket,
+checks SO_PEERCRED and requires the configured peer UID (production policy
+should normally be UID 0), then incrementally reads the fixed-size record
+without blocking the event loop. It rejects short/closed requests, invalid
+magic/version/size, nonzero reserved bytes, invalid remote flags, unterminated
+or control-character metadata, and UIDs absent from the daemon's NSS view.
 
-The wire record uses native-endian fixed-width integer fields and is intended
-only for local processes on the same host/ABI. A future protocol revision
-must use an explicitly encoded byte order before cross-ABI support.
+The target login UID is intentionally not compared to the socket peer UID:
+privileged PAM stacks commonly create sessions for other accounts. The
+peer UID authorizes the PAM client process; the payload UID selects the
+account and is independently checked through NSS. Metadata is bounded and
+validated but remains descriptive input, not authorization.
 
-The current PAM module is an ingress client only. A daemon-side acceptor,
-strict record parser, socket activation/permissions, and end-to-end PAM
-tests are still required before this module is suitable for deployment.
+The record uses native-endian fixed-width fields and is local-host/ABI only.
+The daemon must create and protect the listening socket in a root-owned
+runtime directory, pass only its listening fd to the event loop, and call
+`dl_pam_ingress_accept()` for accepted connections. Call
+`dl_pam_ingress_step()` when a pending client is readable; after it reports
+complete, monitor `dl_pam_ingress_peer_closed()`. Destroy each ingress
+object on errors or after disconnect.
+
+The PAM module and protocol ingress are implemented, but a complete daemon
+entry point, secure runtime-directory/socket creation, PAM response/ack
+protocol, installation rules, and end-to-end system PAM tests remain
+necessary before production deployment.
