@@ -89,7 +89,8 @@ dl_result dl_linux_process_identity_read(uint32_t pid, dl_process_identity *iden
 
     proc_fd = open("/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (proc_fd < 0) {
-        result = DL_ERR_NOT_FOUND;
+        /* Missing or inaccessible procfs is an environment error, not a dead PID. */
+        result = DL_ERR_STATE;
         goto out;
     }
     process_fd = openat(proc_fd, pid_text, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
