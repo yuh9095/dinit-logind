@@ -6,6 +6,7 @@
 #include "runtime_socket.h"
 #include "../dbus/dbus.h"
 #include "../platform/linux/pam_ingress.h"
+#include "../platform/linux/cgroup_v2.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -123,6 +124,7 @@ static int run_event_loop(dl_manager *manager, dl_dbus *dbus, int listener,
     while (!stopping) {
         int ready;
         if (dl_dbus_process(dbus) < 0) { exit_status = 1; break; }
+        dl_linux_cgroup_v2_registry_reap();
         struct client *client, *next;
 
         descriptors[0].fd = listener;

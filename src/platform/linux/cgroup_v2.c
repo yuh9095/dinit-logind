@@ -439,6 +439,24 @@ int dl_linux_cgroup_v2_session_kill_all(
     return result;
 }
 
+
+void dl_linux_cgroup_v2_registry_reap(void)
+{
+    struct cgroup_session_registry_entry **link = &session_registry;
+    while (*link != NULL) {
+        struct cgroup_session_registry_entry *entry = *link;
+        if (unlinkat(entry->parent_fd, entry->name, AT_REMOVEDIR) == 0 ||
+            errno == ENOENT) {
+            *link = entry->next;
+            (void)close(entry->fd);
+            (void)close(entry->parent_fd);
+            free(entry);
+            continue;
+        }
+        link = &entry->next;
+    }
+}
+
 int dl_linux_cgroup_v2_session_close(dl_linux_cgroup_v2_session *session)
 {
     struct cgroup_session_registry_entry **link;

@@ -131,10 +131,14 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
         if (r == 0)
             r = dl_linux_cgroup_v2_session_open(
                 &parent, pending->session_id, &leader, &cgroup_session);
-        if (r == 0)
+        if (r == 0) {
             r = dl_linux_cgroup_v2_session_kill_all(&cgroup_session);
-        if (cgroup_session.fd >= 0)
+            if (r == 0 &&
+                dl_linux_cgroup_v2_session_close(&cgroup_session) != 0)
+                dl_linux_cgroup_v2_session_release(&cgroup_session);
+        } else if (cgroup_session.fd >= 0) {
             dl_linux_cgroup_v2_session_release(&cgroup_session);
+        }
         dl_linux_cgroup_v2_close(&parent);
         if (r == -ENOENT || r == -ENODEV || r == -EACCES || r == -EPERM)
             r = -ENOTSUP;
