@@ -537,13 +537,21 @@ int main(void)
     (void)snprintf(child_path, sizeof(child_path), "%s", returned_path);
     sd_bus_message_unref(reply);
     reply = NULL;
+    /* Synthetic sessions created outside the PAM ingress have no
+     * daemon-owned cgroup. Terminate must fail closed rather than silently
+     * degrading to signaling only the Leader. */
     r = sd_bus_call_method(client, LOGIN1_NAME, child_path, SESSION_IFACE,
                            "Terminate", &error, &reply, "");
-    if (r < 0) goto stop_server;
+    if (r >= 0 || !sd_bus_error_has_name(&error,
+            "org.freedesktop.DBus.Error.NotSupported"))
+        goto stop_server;
+    sd_bus_error_free(&error);
     sd_bus_message_unref(reply);
     reply = NULL;
-    if (waitpid(child_pid, &child_status, 0) != child_pid ||
-        !WIFSIGNALED(child_status) || WTERMSIG(child_status) != SIGTERM)
+    if (kill(child_pid, 0) != 0) goto stop_server;
+    if (kill(child_pid, SIGKILL) != 0 ||
+        waitpid(child_pid, &child_status, 0) != child_pid ||
+        !WIFSIGNALED(child_status) || WTERMSIG(child_status) != SIGKILL)
         goto stop_server;
     child_pid = -1;
     pthread_mutex_lock(&server.lock);
