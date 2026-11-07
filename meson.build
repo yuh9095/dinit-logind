@@ -6,5 +6,11 @@ project(
   default_options: ['c_std=c11', 'warning_level=3', 'werror=true'],
 )
 
-# Daemon targets and dependencies will be added after the API and subsystem audit.
-# Keep the initial scaffold dependency-free.
+core_lib = static_library(
+  'dinit-logind-core',
+  'src/core/core.c',
+  include_directories: include_directories('src/core'),
+  install: false,
+)
+
+subdir('tests/unit')
