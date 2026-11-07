@@ -60,6 +60,8 @@ static int uid_to_name(uint32_t uid, char *name, size_t size)
     return 0;
 }
 
+static int path_for_user(uint32_t uid, char *path, size_t size);
+
 static int method_get_session(sd_bus_message *m, void *userdata,
                               sd_bus_error *ret_error)
 {
