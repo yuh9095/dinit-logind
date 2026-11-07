@@ -10,14 +10,14 @@ permissions:
 
 jobs:
   meson-setup:
-    name: Meson project validation
+    name: Meson project and PAM module validation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install build tools
+      - name: Install build tools and PAM headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y meson ninja-build
+          sudo apt-get install -y meson ninja-build libpam0g-dev
       - name: Configure
         run: meson setup builddir
       - name: Compile
