@@ -111,13 +111,14 @@ int main(void)
     sd_bus_error error = SD_BUS_ERROR_NULL;
     char object_path[256], user_path[256], seat_path[256];
     const char *returned_path = NULL;
-    int callback_count = 0, r, result = 1;
+    int callback_count = 0, r, result = 1, stage = 0;
     int active = 1;
 
     if (!address) {
         fprintf(stderr, "DBUS_SESSION_BUS_ADDRESS is not set\n");
         return 1;
     }
+    stage = 1;
     manager = dl_manager_new();
     if (!manager) goto finish;
     r = dl_dbus_open_address(&dbus, manager, address);
@@ -125,8 +126,10 @@ int main(void)
         fprintf(stderr, "cannot open test bus: %s\n", strerror(-r));
         goto finish;
     }
+    stage = 2;
     if (open_client(&client, address) < 0) goto finish;
 
+    stage = 3;
     r = sd_bus_add_match(client, &new_slot,
         "type='signal',sender='org.freedesktop.login1',interface='org.freedesktop.login1.Manager',member='SessionNew'",
         signal_counter, &callback_count);
@@ -157,13 +160,16 @@ int main(void)
     spec.type = "tty";
     spec.session_class = "user";
 
+    stage = 4;
     pthread_mutex_lock(&server.lock);
     r = dl_session_create(manager, &spec, &session);
     pthread_mutex_unlock(&server.lock);
     if (r != DL_OK) goto stop_server;
+    stage = 5;
     if (pump_until(client, &session_new_count, 1) < 0 || session_new_count != 1)
         goto stop_server;
 
+    stage = 6;
     r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
                            "GetSession", &error, &reply, "s", dl_session_id(session));
     if (r < 0 || sd_bus_message_read(reply, "o", &returned_path) < 0)
@@ -172,10 +178,12 @@ int main(void)
     sd_bus_message_unref(reply);
     reply = NULL;
 
+    stage = 7;
     r = sd_bus_get_property_trivial(client, LOGIN1_NAME, object_path,
         SESSION_IFACE, "Active", &error, 'b', &active);
     if (r < 0 || active != 0) goto stop_server;
 
+    stage = 8;
     r = sd_bus_call_method(client, LOGIN1_NAME, object_path,
         "org.freedesktop.DBus.Properties", "GetAll", &error, &reply,
         "s", SESSION_IFACE);
@@ -183,6 +191,7 @@ int main(void)
     sd_bus_message_unref(reply);
     reply = NULL;
 
+    stage = 9;
     r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
                            "GetUser", &error, &reply, "u", spec.uid);
     if (r < 0 || sd_bus_message_read(reply, "o", &returned_path) < 0)
@@ -192,12 +201,14 @@ int main(void)
         goto stop_server;
     sd_bus_message_unref(reply);
     reply = NULL;
+    stage = 10;
     r = sd_bus_call_method(client, LOGIN1_NAME, user_path,
         "org.freedesktop.DBus.Properties", "GetAll", &error, &reply,
         "s", "org.freedesktop.login1.User");
     if (r < 0 || !reply) goto stop_server;
     sd_bus_message_unref(reply);
     reply = NULL;
+    stage = 11;
     r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
                            "GetSeat", &error, &reply, "s", "seat0");
     if (r < 0 || sd_bus_message_read(reply, "o", &returned_path) < 0)
@@ -205,6 +216,7 @@ int main(void)
     (void)snprintf(seat_path, sizeof(seat_path), "%s", returned_path);
     sd_bus_message_unref(reply);
     reply = NULL;
+    stage = 12;
     r = sd_bus_call_method(client, LOGIN1_NAME, seat_path,
         "org.freedesktop.DBus.Properties", "GetAll", &error, &reply,
         "s", "org.freedesktop.login1.Seat");
@@ -212,20 +224,24 @@ int main(void)
     sd_bus_message_unref(reply);
     reply = NULL;
 
+    stage = 13;
     pthread_mutex_lock(&server.lock);
     r = dl_session_activate(manager, dl_session_id(session));
     pthread_mutex_unlock(&server.lock);
     if (r != DL_OK) goto stop_server;
+    stage = 14;
     if (pump_until(client, &properties_changed_count, 3) < 0) goto stop_server;
     active = 0;
     r = sd_bus_get_property_trivial(client, LOGIN1_NAME, object_path,
         SESSION_IFACE, "Active", &error, 'b', &active);
     if (r < 0 || active != 1) goto stop_server;
 
+    stage = 15;
     pthread_mutex_lock(&server.lock);
     r = dl_session_close(manager, dl_session_id(session));
     pthread_mutex_unlock(&server.lock);
     if (r != DL_OK) goto stop_server;
+    stage = 16;
     if (pump_until(client, &session_removed_count, 1) < 0 || session_removed_count != 1)
         goto stop_server;
 
@@ -236,6 +252,10 @@ int main(void)
     result = 0;
 
 stop_server:
+    if (result != 0)
+        fprintf(stderr, "D-Bus integration failed at stage %d (r=%d, error=%s: %s)\n",
+                stage, r, error.name ? error.name : "-",
+                error.message ? error.message : "-");
     atomic_store(&server.stop, true);
     pthread_join(thread, NULL);
     if (atomic_load(&server.failed)) result = 1;
