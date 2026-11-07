@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -47,6 +48,7 @@ static void test_session_signal_tree(void)
     pid_t first = -1, second = -1;
     int result, status;
     bool nested_created = false;
+    bool nested_dir_created = false;
 
     if (dl_linux_cgroup_v2_open_current(&parent) < 0) return;
     first = spawn_waiter();
@@ -64,7 +66,9 @@ static void test_session_signal_tree(void)
     if (result < 0) goto out;
 
     if (mkdirat(session.fd, "nested", 0755) == 0) {
-        int nested_fd = openat(session.fd, "nested",
+        int nested_fd;
+        nested_dir_created = true;
+        nested_fd = openat(session.fd, "nested",
             O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (nested_fd >= 0) {
             int procs_fd = openat(nested_fd, "cgroup.procs",
@@ -101,17 +105,22 @@ static void test_session_signal_tree(void)
                         O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
         if (fd >= 0) {
             int n = snprintf(pid_text, sizeof(pid_text), "%ld", (long)second);
+            ssize_t written = -1;
             if (n > 0 && (size_t)n < sizeof(pid_text))
-                (void)write(fd, pid_text, (size_t)n);
+                written = write(fd, pid_text, (size_t)n);
             (void)close(fd);
-            result = dl_linux_cgroup_v2_session_signal_all(&session, SIGTERM);
-            if (result == 0) {
-                assert(waitpid(second, &status, 0) == second);
-                assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGTERM);
-                second = -1;
+            if (n > 0 && written == n) {
+                result = dl_linux_cgroup_v2_session_signal_all(&session, SIGTERM);
+                if (result == 0) {
+                    assert(waitpid(second, &status, 0) == second);
+                    assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGTERM);
+                    second = -1;
+                }
             }
         }
     }
+    if (nested_dir_created && !nested_created)
+        (void)unlinkat(session.fd, "nested", AT_REMOVEDIR);
     (void)dl_linux_cgroup_v2_session_close(&session);
 out:
     stop_and_reap(first);
