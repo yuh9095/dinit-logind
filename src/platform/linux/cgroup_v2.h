@@ -50,6 +50,12 @@ void dl_linux_cgroup_v2_session_release(dl_linux_cgroup_v2_session *session);
 /* Reap empty cgroups previously created by this daemon instance. */
 void dl_linux_cgroup_v2_registry_reap(void);
 
+/* Send a non-SIGKILL signal to processes currently verified in this
+ * daemon-owned session cgroup. Requires pidfd_open/pidfd_send_signal; no
+ * numeric-PID kill(2) fallback is permitted. */
+int dl_linux_cgroup_v2_session_signal_all(
+    const dl_linux_cgroup_v2_session *session, int signal_number);
+
 /* cgroup.kill is required; missing support returns -ENOTSUP. */
 int dl_linux_cgroup_v2_session_kill_all(
     const dl_linux_cgroup_v2_session *session);

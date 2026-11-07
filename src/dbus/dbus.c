@@ -123,10 +123,6 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
         dl_linux_cgroup_v2 parent = {-1, {0}};
         dl_linux_cgroup_v2_session cgroup_session = {-1, -1, {0}};
         dl_process_identity leader = dl_session_leader(session);
-        if (pending->signal_number != SIGKILL) {
-            r = -ENOTSUP;
-            break;
-        }
         r = dl_linux_cgroup_v2_open_current(&parent);
         if (r < 0) {
             r = -ENOTSUP;
@@ -135,7 +131,10 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
         r = dl_linux_cgroup_v2_session_open(
             &parent, pending->session_id, &leader, &cgroup_session);
         if (r == 0) {
-            r = dl_linux_cgroup_v2_session_kill_all(&cgroup_session);
+            r = pending->signal_number == SIGKILL ?
+                dl_linux_cgroup_v2_session_kill_all(&cgroup_session) :
+                dl_linux_cgroup_v2_session_signal_all(
+                    &cgroup_session, pending->signal_number);
             if (r == 0 &&
                 dl_linux_cgroup_v2_session_close(&cgroup_session) != 0)
                 dl_linux_cgroup_v2_session_release(&cgroup_session);
@@ -160,7 +159,7 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
         sd_bus_error_set_const(&error,
             r == -ENOTSUP ? "org.freedesktop.DBus.Error.NotSupported" :
                             "org.freedesktop.login1.OperationFailed",
-            r == -ENOTSUP ? "Safe session signaling requires cgroup v2 cgroup.kill or pidfd support" :
+            r == -ENOTSUP ? "Safe session signaling requires cgroup v2 and pidfd support" :
                             "The authorized session operation failed");
         (void)sd_bus_reply_method_error(pending->request, &error);
     } else {

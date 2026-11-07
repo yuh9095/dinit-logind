@@ -441,6 +441,124 @@ int dl_linux_cgroup_v2_session_kill_all(
 }
 
 
+
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+static int cgroup_v2_read_procs(const dl_linux_cgroup_v2_session *session,
+                               char *buffer, size_t capacity)
+{
+    int fd;
+    size_t used = 0;
+    if (capacity < 2) return -EINVAL;
+    fd = openat(session->fd, "cgroup.procs",
+                O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -errno;
+    while (used + 1 < capacity) {
+        ssize_t n = read(fd, buffer + used, capacity - used - 1);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            {
+                int saved = errno;
+                (void)close(fd);
+                return -saved;
+            }
+        }
+        if (n == 0) break;
+        used += (size_t)n;
+    }
+    (void)close(fd);
+    if (used + 1 == capacity) return -EOVERFLOW;
+    buffer[used] = '\0';
+    return 0;
+}
+
+static int cgroup_v2_contains_pid(const dl_linux_cgroup_v2_session *session,
+                                  pid_t wanted, bool *contains)
+{
+    char buffer[65536];
+    char *line, *saveptr = NULL;
+    int r;
+    *contains = false;
+    r = cgroup_v2_read_procs(session, buffer, sizeof(buffer));
+    if (r < 0) return r;
+    for (line = strtok_r(buffer, "\n", &saveptr); line;
+         line = strtok_r(NULL, "\n", &saveptr)) {
+        char *end = NULL;
+        long value;
+        errno = 0;
+        value = strtol(line, &end, 10);
+        if (errno != 0 || end == line || *end != '\0' ||
+            value <= 0 || value > INT_MAX)
+            return -EIO;
+        if ((pid_t)value == wanted) {
+            *contains = true;
+            return 0;
+        }
+    }
+    return 0;
+}
+#endif
+
+int dl_linux_cgroup_v2_session_signal_all(
+    const dl_linux_cgroup_v2_session *session, int signal_number)
+{
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+    char buffer[65536];
+    char *line, *saveptr = NULL;
+    int r;
+    if (session == NULL || session->fd < 0 || signal_number <= 0 ||
+        signal_number >= NSIG || signal_number == SIGKILL)
+        return -EINVAL;
+    r = cgroup_v2_read_procs(session, buffer, sizeof(buffer));
+    if (r < 0) return r;
+    for (line = strtok_r(buffer, "\n", &saveptr); line;
+         line = strtok_r(NULL, "\n", &saveptr)) {
+        char *end = NULL;
+        long value;
+        int pidfd, saved_errno;
+        bool still_member = false;
+        dl_process_identity identity;
+        errno = 0;
+        value = strtol(line, &end, 10);
+        if (errno != 0 || end == line || *end != '\0' ||
+            value <= 0 || value > INT_MAX)
+            return -EIO;
+
+        /* Open the pidfd before inspecting /proc so a later PID reuse cannot
+         * redirect the signal to an unrelated process. */
+        pidfd = (int)syscall(SYS_pidfd_open, (pid_t)value, 0);
+        if (pidfd < 0) {
+            if (errno == ESRCH) continue;
+            return errno == ENOSYS ? -ENOTSUP : -errno;
+        }
+        if (dl_linux_process_identity_read((uint32_t)value, &identity) != DL_OK) {
+            (void)close(pidfd);
+            continue;
+        }
+        r = cgroup_v2_contains_pid(session, (pid_t)value, &still_member);
+        if (r < 0) {
+            (void)close(pidfd);
+            return r;
+        }
+        if (!still_member) {
+            (void)close(pidfd);
+            continue;
+        }
+        r = (int)syscall(SYS_pidfd_send_signal, pidfd, signal_number, NULL, 0);
+        saved_errno = errno;
+        (void)close(pidfd);
+        if (r < 0 && saved_errno != ESRCH)
+            return saved_errno == ENOSYS ? -ENOTSUP : -saved_errno;
+    }
+    return 0;
+#else
+    (void)session;
+    (void)signal_number;
+    return -ENOTSUP;
+#endif
+}
+
+
+
 void dl_linux_cgroup_v2_registry_reap(void)
 {
     struct cgroup_session_registry_entry **link = &session_registry;
