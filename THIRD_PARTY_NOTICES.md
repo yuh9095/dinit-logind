@@ -4,12 +4,12 @@ This file tracks provenance for third-party code and specifications incorporated
 
 ## Current status
 
-No upstream implementation source has been copied into the repository scaffold.
+No upstream implementation source has been copied into the repository scaffold or runtime module.
 
-## Planned references (not runtime dependencies)
+## Audited references (not runtime dependencies)
 
 - systemd v262.2: primary behavioral/API reference for login1 and logind. Review each source file's license and copyright notice individually; systemd files commonly carry LGPL-2.1-or-later notices.
-- Turnstile: reference for session, PAM, runtime-directory, linger, and Dinit user-service lifecycle functionality. Verify the exact license and preserve required notices for every adapted file.
+- Turnstile: audited at commit e3413dad386bf72048646f9f9ffd3a8d60e10eb0, repository https://github.com/chimera-linux/turnstile. Upstream license is BSD-2-Clause; see its COPYING.md. This repository currently uses Turnstile as a behavioral/design reference and has not copied its implementation files.
 - Dinit: native service-manager backend target. Follow the upstream license and API contract.
 
 ## Required process before importing code

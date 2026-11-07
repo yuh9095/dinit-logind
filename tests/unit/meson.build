@@ -5,7 +5,6 @@ core_test = executable(
   link_with: core_lib,
   install: false,
 )
-
 test('core session and user lifecycle', core_test)
 
 process_identity_test = executable(
@@ -15,7 +14,6 @@ process_identity_test = executable(
   link_with: [core_lib, linux_identity_lib],
   install: false,
 )
-
 test('Linux process identity acquisition', process_identity_test)
 
 peer_credentials_test = executable(
@@ -25,7 +23,6 @@ peer_credentials_test = executable(
   link_with: [core_lib, linux_identity_lib, linux_peer_credentials_lib],
   install: false,
 )
-
 test('Linux Unix socket peer credentials', peer_credentials_test)
 
 pam_session_test = executable(
@@ -35,7 +32,6 @@ pam_session_test = executable(
   link_with: [core_lib, linux_identity_lib, linux_peer_credentials_lib, linux_pam_session_lib],
   install: false,
 )
-
 test('PAM session socket lifetime', pam_session_test)
 
 pam_ingress_test = executable(
@@ -45,7 +41,6 @@ pam_ingress_test = executable(
   link_with: [core_lib, linux_identity_lib, linux_peer_credentials_lib, linux_pam_session_lib, linux_pam_ingress_lib],
   install: false,
 )
-
 test('PAM ingress protocol and lifecycle', pam_ingress_test)
 
 daemon_config_test = executable(
@@ -55,5 +50,13 @@ daemon_config_test = executable(
   link_with: daemon_config_lib,
   install: false,
 )
-
 test('daemon configuration ownership and parsing', daemon_config_test)
+
+runtime_test = executable(
+  'test-runtime',
+  'test_runtime.c',
+  include_directories: include_directories('../../src/core', '../../src/runtime'),
+  link_with: [core_lib, runtime_lib],
+  install: false,
+)
+test('runtime directory and persistent linger', runtime_test)

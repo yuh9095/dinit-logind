@@ -46,6 +46,14 @@ linux_pam_ingress_lib = static_library(
   install: false,
 )
 
+runtime_lib = static_library(
+  'dinit-logind-runtime',
+  'src/runtime/runtime.c',
+  include_directories: include_directories('src/core', 'src/runtime'),
+  link_with: core_lib,
+  install: false,
+)
+
 daemon_config_lib = static_library(
   'dinit-logind-daemon-config',
   'src/daemon/config.c',
