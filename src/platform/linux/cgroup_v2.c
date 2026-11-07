@@ -133,6 +133,7 @@ int dl_linux_cgroup_v2_open_current(dl_linux_cgroup_v2 *cgroup)
     char contents[DL_CGROUP_TEXT_MAX];
     int root_fd = -1, current_fd = -1, result;
     char path[sizeof(cgroup->path)];
+    char walk_path[sizeof(cgroup->path)];
     char *component, *saveptr = NULL;
 
     if (cgroup == NULL) return -EINVAL;
@@ -142,6 +143,8 @@ int dl_linux_cgroup_v2_open_current(dl_linux_cgroup_v2 *cgroup)
     if (result != 0) return result;
     result = dl_linux_cgroup_v2_parse_self_cgroup(contents, path, sizeof(path));
     if (result != 0) return result;
+    (void)snprintf(cgroup->path, sizeof(cgroup->path), "%s", path);
+    (void)snprintf(walk_path, sizeof(walk_path), "%s", path);
 
     root_fd = open(DL_CGROUP_MOUNT,
                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -151,7 +154,7 @@ int dl_linux_cgroup_v2_open_current(dl_linux_cgroup_v2 *cgroup)
 
     current_fd = root_fd;
     root_fd = -1;
-    for (component = strtok_r(path + 1, "/", &saveptr);
+    for (component = strtok_r(walk_path + 1, "/", &saveptr);
          component != NULL;
          component = strtok_r(NULL, "/", &saveptr)) {
         int next_fd = openat(current_fd, component,
@@ -167,11 +170,11 @@ int dl_linux_cgroup_v2_open_current(dl_linux_cgroup_v2 *cgroup)
     if (result != 0) goto out;
     cgroup->fd = current_fd;
     current_fd = -1;
-    (void)snprintf(cgroup->path, sizeof(cgroup->path), "%s", path);
     result = 0;
 out:
     if (current_fd >= 0) (void)close(current_fd);
     if (root_fd >= 0) (void)close(root_fd);
+    if (result != 0) cgroup->path[0] = '\\0';
     return result;
 }
 
@@ -258,7 +261,7 @@ int dl_linux_cgroup_v2_session_create(
 
     procs_fd = openat(child_fd, "cgroup.procs", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
     if (procs_fd < 0) { result = -errno; goto out; }
-    if (snprintf(pid_text, sizeof(pid_text), "%u", leader->pid) >=
+    if (snprintf(pid_text, sizeof(pid_text), "%u\\n", leader->pid) >=
         (int)sizeof(pid_text)) {
         result = -EINVAL;
         goto out;
