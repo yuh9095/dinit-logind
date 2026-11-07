@@ -10,7 +10,7 @@ Closed Session records remain allocated until manager destruction. This preserve
 
 ## User model
 
-A User is keyed by numeric UID. It may exist before its first session (for example, because linger is configured) and remains present until manager destruction. Its session count includes all sessions not in CLOSED state. The legacy `dl_user_active_session_count()` accessor remains as a source-compatible alias for this count.
+A User is keyed by numeric UID. It may exist before its first session (for example, because linger is configured) and remains present until manager destruction. Its session count includes all sessions not in CLOSED state. Its active-session count includes only sessions whose core state is ACTIVE; activating a different session on the same seat decrements the previous user's active count and increments the new user's count. The `dl_user_active_session_count()` accessor reports this distinct count.
 
 ## Seat model
 

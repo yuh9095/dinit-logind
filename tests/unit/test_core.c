@@ -83,6 +83,7 @@ int main(void)
     assert(listed_session == first);
     assert(dl_manager_session_at(manager, 1) == NULL);
     assert(dl_user_session_count(dl_user_find(manager, 1000)) == 1);
+    assert(dl_user_active_session_count(dl_user_find(manager, 1000)) == 0);
 
     /* Initial object creation is observable in order: user, seat, session. */
     assert(dl_manager_next_event(manager, cursor, &event) == DL_OK);
@@ -114,17 +115,21 @@ int main(void)
     assert(dl_session_activate(manager, first_id) == DL_OK);
     assert(dl_session_activate(manager, first_id) == DL_OK);
     assert(dl_session_get_state(first) == DL_SESSION_ACTIVE);
+    assert(dl_user_active_session_count(dl_user_find(manager, 1000)) == 1);
     assert(strcmp(dl_seat_active_session_id(seat), first_id) == 0);
     assert(dl_session_activate(manager, dl_session_id(second)) == DL_OK);
     assert(dl_session_get_state(first) == DL_SESSION_OPEN);
     assert(dl_session_get_state(second) == DL_SESSION_ACTIVE);
+    assert(dl_user_active_session_count(dl_user_find(manager, 1000)) == 1);
     assert(strcmp(dl_seat_active_session_id(seat), dl_session_id(second)) == 0);
     assert(dl_seat_session_count(seat) == 2);
 
     assert(dl_session_deactivate(manager, dl_session_id(second)) == DL_OK);
     assert(dl_session_get_state(second) == DL_SESSION_OPEN);
+    assert(dl_user_active_session_count(dl_user_find(manager, 1000)) == 0);
     assert(dl_seat_active_session_id(seat) == NULL);
     assert(dl_session_activate(manager, dl_session_id(second)) == DL_OK);
+    assert(dl_user_active_session_count(dl_user_find(manager, 1000)) == 1);
 
     assert(dl_session_close(manager, first_id) == DL_OK);
     assert(dl_session_close(manager, first_id) == DL_OK);
@@ -132,6 +137,7 @@ int main(void)
     assert(dl_session_find_by_identity(manager, &reused_pid) == NULL);
     user = dl_user_find(manager, 1000);
     assert(dl_user_session_count(user) == 1);
+    assert(dl_user_active_session_count(user) == 1);
     assert(dl_session_activate(manager, first_id) == DL_ERR_STATE);
     assert(dl_seat_session_count(seat) == 1);
     assert(strcmp(dl_seat_active_session_id(seat), dl_session_id(second)) == 0);
@@ -139,6 +145,7 @@ int main(void)
     assert(dl_manager_session_at(manager, 0) == second);
 
     assert(dl_session_close(manager, dl_session_id(second)) == DL_OK);
+    assert(dl_user_active_session_count(user) == 0);
     assert(dl_seat_session_count(seat) == 0);
     assert(dl_seat_active_session_id(seat) == NULL);
     assert(dl_manager_session_count(manager) == 0);
@@ -158,7 +165,9 @@ int main(void)
     assert(dl_session_create(manager, &spec, &first) == DL_OK);
     assert(dl_session_seat(first) == NULL);
     assert(dl_session_activate(manager, dl_session_id(first)) == DL_OK);
+    assert(dl_user_active_session_count(dl_user_find(manager, 3000)) == 1);
     assert(dl_session_close(manager, dl_session_id(first)) == DL_OK);
+    assert(dl_user_active_session_count(dl_user_find(manager, 3000)) == 0);
 
     spec = make_spec(4000, 88, 0, 123);
     assert(dl_session_create(manager, &spec, &first) == DL_ERR_INVALID);

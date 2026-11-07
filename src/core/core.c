@@ -11,6 +11,7 @@ struct dl_user {
     uint32_t uid;
     bool linger;
     uint32_t sessions;
+    uint32_t active_sessions;
     struct dl_user *next;
 };
 
@@ -356,6 +357,8 @@ dl_result dl_session_close(dl_manager *manager, const char *session_id)
     }
     session->state = DL_SESSION_CLOSED;
     if (session->user->sessions > 0) --session->user->sessions;
+    if (old_state == DL_SESSION_ACTIVE && session->user->active_sessions > 0)
+        --session->user->active_sessions;
     event_session_state(manager, session, old_state);
     if (seat_active) event_seat_active(manager, session->seat_object);
     event_session_removed(manager, session);
@@ -377,6 +380,8 @@ dl_result dl_session_activate(dl_manager *manager, const char *session_id)
         struct dl_session *previous = session->seat_object->active_session;
         if (previous != NULL) {
             previous->state = DL_SESSION_OPEN;
+            if (previous->user->active_sessions > 0)
+                --previous->user->active_sessions;
             event_session_state(manager, previous, DL_SESSION_ACTIVE);
         }
         session->seat_object->active_session = session;
@@ -384,8 +389,10 @@ dl_result dl_session_activate(dl_manager *manager, const char *session_id)
     {
         dl_session_state old_state = session->state;
         session->state = DL_SESSION_ACTIVE;
-        if (old_state != DL_SESSION_ACTIVE)
+        if (old_state != DL_SESSION_ACTIVE) {
+            ++session->user->active_sessions;
             event_session_state(manager, session, old_state);
+        }
     }
     if (session->seat_object != NULL)
         event_seat_active(manager, session->seat_object);
@@ -402,6 +409,8 @@ dl_result dl_session_deactivate(dl_manager *manager, const char *session_id)
                   session->seat_object->active_session == session;
     if (session->state == DL_SESSION_ACTIVE) {
         session->state = DL_SESSION_OPEN;
+        if (session->user->active_sessions > 0)
+            --session->user->active_sessions;
         event_session_state(manager, session, DL_SESSION_ACTIVE);
     }
     if (seat_active) {
@@ -525,7 +534,10 @@ const dl_user *dl_user_find(const dl_manager *manager, uint32_t uid)
 uint32_t dl_user_uid(const dl_user *user) { return user == NULL ? 0 : user->uid; }
 bool dl_user_linger_enabled(const dl_user *user) { return user != NULL && user->linger; }
 uint32_t dl_user_session_count(const dl_user *user) { return user == NULL ? 0 : user->sessions; }
-uint32_t dl_user_active_session_count(const dl_user *user) { return dl_user_session_count(user); }
+uint32_t dl_user_active_session_count(const dl_user *user)
+{
+    return user == NULL ? 0 : user->active_sessions;
+}
 
 uint64_t dl_manager_event_generation(const dl_manager *manager)
 {
