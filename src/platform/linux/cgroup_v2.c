@@ -24,6 +24,16 @@
 #define DL_CGROUP_MOUNT "/sys/fs/cgroup"
 #define DL_CGROUP_TEXT_MAX 16384
 
+struct cgroup_session_registry_entry {
+    char name[96];
+    int parent_fd;
+    int fd;
+    struct cgroup_session_registry_entry *next;
+};
+
+/* All registry operations run on the daemon's single event-loop thread. */
+static struct cgroup_session_registry_entry *session_registry;
+
 static bool valid_cgroup_path(const char *path)
 {
     const char *cursor;
@@ -230,8 +240,10 @@ int dl_linux_cgroup_v2_session_create(
 {
 #if defined(SYS_pidfd_open)
     dl_process_identity current;
+    struct cgroup_session_registry_entry *entry = NULL;
     char pid_text[32];
-    int pidfd = -1, parent_copy = -1, child_fd = -1, procs_fd = -1;
+    int pidfd = -1, parent_copy = -1, child_fd = -1;
+    int session_parent_fd = -1, session_fd = -1, procs_fd = -1;
     int result = -EINVAL;
     bool created = false;
 
@@ -247,8 +259,16 @@ int dl_linux_cgroup_v2_session_create(
     result = verify_cgroup2_fd(parent->fd);
     if (result != 0) return result;
 
+    entry = calloc(1, sizeof(*entry));
+    if (entry == NULL) return -ENOMEM;
+    entry->parent_fd = -1;
+    entry->fd = -1;
+
     pidfd = (int)syscall(SYS_pidfd_open, (pid_t)leader->pid, 0);
-    if (pidfd < 0) return errno == ENOSYS ? -ENOTSUP : -errno;
+    if (pidfd < 0) {
+        result = errno == ENOSYS ? -ENOTSUP : -errno;
+        goto out;
+    }
     if (dl_linux_process_identity_read(leader->pid, &current) != DL_OK ||
         !same_process(leader, &current)) {
         result = -ESRCH;
@@ -258,21 +278,28 @@ int dl_linux_cgroup_v2_session_create(
     parent_copy = fcntl(parent->fd, F_DUPFD_CLOEXEC, 0);
     if (parent_copy < 0) { result = -errno; goto out; }
 
-    result = make_session_name(session_id, leader, session->name,
-                               sizeof(session->name));
+    result = make_session_name(session_id, leader, entry->name,
+                               sizeof(entry->name));
     if (result != 0) goto out;
-    if (mkdirat(parent->fd, session->name, 0755) != 0) {
+    if (mkdirat(parent->fd, entry->name, 0755) != 0) {
         result = -errno;
         goto out;
     }
     created = true;
-    child_fd = openat(parent->fd, session->name,
+    child_fd = openat(parent->fd, entry->name,
                       O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (child_fd < 0) { result = -errno; goto out; }
     result = verify_cgroup2_fd(child_fd);
     if (result != 0) goto out;
 
-    procs_fd = openat(child_fd, "cgroup.procs", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    /* Allocate every handle and registry object before moving the process. */
+    session_parent_fd = fcntl(parent_copy, F_DUPFD_CLOEXEC, 0);
+    if (session_parent_fd < 0) { result = -errno; goto out; }
+    session_fd = fcntl(child_fd, F_DUPFD_CLOEXEC, 0);
+    if (session_fd < 0) { result = -errno; goto out; }
+
+    procs_fd = openat(child_fd, "cgroup.procs",
+                      O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
     if (procs_fd < 0) { result = -errno; goto out; }
     if (snprintf(pid_text, sizeof(pid_text), "%u\n", leader->pid) >=
         (int)sizeof(pid_text)) {
@@ -296,18 +323,29 @@ int dl_linux_cgroup_v2_session_create(
         goto out;
     }
 
-    session->parent_fd = parent_copy;
-    session->fd = child_fd;
+    entry->parent_fd = parent_copy;
+    entry->fd = child_fd;
+    entry->next = session_registry;
+    session_registry = entry;
     parent_copy = -1;
     child_fd = -1;
+    session->parent_fd = session_parent_fd;
+    session->fd = session_fd;
+    (void)snprintf(session->name, sizeof(session->name), "%s", entry->name);
+    session_parent_fd = -1;
+    session_fd = -1;
+    entry = NULL;
     result = 0;
 out:
     if (procs_fd >= 0) (void)close(procs_fd);
+    if (session_fd >= 0) (void)close(session_fd);
+    if (session_parent_fd >= 0) (void)close(session_parent_fd);
     if (child_fd >= 0) (void)close(child_fd);
     if (created && result != 0)
-        (void)unlinkat(parent->fd, session->name, AT_REMOVEDIR);
+        (void)unlinkat(parent->fd, entry->name, AT_REMOVEDIR);
     if (parent_copy >= 0) (void)close(parent_copy);
     if (pidfd >= 0) (void)close(pidfd);
+    free(entry);
     if (result != 0) {
         session->parent_fd = -1;
         session->fd = -1;
@@ -327,12 +365,15 @@ out:
 #endif
 }
 
-
 int dl_linux_cgroup_v2_session_open(
     const dl_linux_cgroup_v2 *parent, const char *session_id,
     const dl_process_identity *leader, dl_linux_cgroup_v2_session *session)
 {
-    int result, parent_copy = -1, child_fd = -1;
+    struct cgroup_session_registry_entry *entry;
+    struct stat expected_parent, registered_parent;
+    char name[96];
+    int result, parent_copy, child_copy;
+
     if (session != NULL) {
         session->parent_fd = -1;
         session->fd = -1;
@@ -342,29 +383,31 @@ int dl_linux_cgroup_v2_session_open(
         return -EINVAL;
     result = verify_cgroup2_fd(parent->fd);
     if (result != 0) return result;
-    result = make_session_name(session_id, leader, session->name,
-                               sizeof(session->name));
+    result = make_session_name(session_id, leader, name, sizeof(name));
     if (result != 0) return result;
-    parent_copy = fcntl(parent->fd, F_DUPFD_CLOEXEC, 0);
-    if (parent_copy < 0) return -errno;
-    child_fd = openat(parent->fd, session->name,
-                      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (child_fd < 0) {
-        result = -errno;
-        (void)close(parent_copy);
-        session->name[0] = '\0';
-        return result;
+    if (fstat(parent->fd, &expected_parent) != 0) return -errno;
+
+    for (entry = session_registry; entry != NULL; entry = entry->next) {
+        if (strcmp(entry->name, name) != 0) continue;
+        if (fstat(entry->parent_fd, &registered_parent) != 0)
+            return -errno;
+        if (expected_parent.st_dev != registered_parent.st_dev ||
+            expected_parent.st_ino != registered_parent.st_ino)
+            return -EXDEV;
+        parent_copy = fcntl(entry->parent_fd, F_DUPFD_CLOEXEC, 0);
+        if (parent_copy < 0) return -errno;
+        child_copy = fcntl(entry->fd, F_DUPFD_CLOEXEC, 0);
+        if (child_copy < 0) {
+            result = -errno;
+            (void)close(parent_copy);
+            return result;
+        }
+        session->parent_fd = parent_copy;
+        session->fd = child_copy;
+        (void)snprintf(session->name, sizeof(session->name), "%s", name);
+        return 0;
     }
-    result = verify_cgroup2_fd(child_fd);
-    if (result != 0) {
-        (void)close(child_fd);
-        (void)close(parent_copy);
-        session->name[0] = '\0';
-        return result;
-    }
-    session->parent_fd = parent_copy;
-    session->fd = child_fd;
-    return 0;
+    return -ENOENT;
 }
 
 void dl_linux_cgroup_v2_session_release(dl_linux_cgroup_v2_session *session)
@@ -398,11 +441,21 @@ int dl_linux_cgroup_v2_session_kill_all(
 
 int dl_linux_cgroup_v2_session_close(dl_linux_cgroup_v2_session *session)
 {
+    struct cgroup_session_registry_entry **link;
     if (session == NULL || session->parent_fd < 0 || session->fd < 0)
         return -EINVAL;
     if (unlinkat(session->parent_fd, session->name, AT_REMOVEDIR) != 0) {
         if (errno == ENOTEMPTY || errno == EBUSY) return -EBUSY;
         if (errno != ENOENT) return -errno;
+    }
+    for (link = &session_registry; *link != NULL; link = &(*link)->next) {
+        struct cgroup_session_registry_entry *entry = *link;
+        if (strcmp(entry->name, session->name) != 0) continue;
+        *link = entry->next;
+        (void)close(entry->fd);
+        (void)close(entry->parent_fd);
+        free(entry);
+        break;
     }
     (void)close(session->fd);
     (void)close(session->parent_fd);
