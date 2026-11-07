@@ -32,6 +32,7 @@ int main(void)
     dl_session_spec spec;
     dl_process_identity reused_pid = {77, 1001, 5000};
     const dl_user *user;
+    const dl_seat *seat;
     char first_id[DL_SESSION_ID_MAX];
 
     assert(manager != NULL);
@@ -46,6 +47,11 @@ int main(void)
     assert(strcmp(dl_session_seat(first), "seat0") == 0);
     assert(dl_session_vtnr(first) == 2);
     assert(dl_user_active_session_count(dl_user_find(manager, 1000)) == 1);
+    seat = dl_seat_find(manager, "seat0");
+    assert(seat != NULL);
+    assert(strcmp(dl_seat_id(seat), "seat0") == 0);
+    assert(dl_seat_session_count(seat) == 1);
+    assert(dl_seat_active_session_id(seat) == NULL);
 
     /* Same process identity cannot own two live sessions. */
     assert(dl_session_create(manager, &spec, &second) == DL_ERR_CONFLICT);
@@ -59,6 +65,19 @@ int main(void)
     assert(dl_session_activate(manager, first_id) == DL_OK);
     assert(dl_session_activate(manager, first_id) == DL_OK);
     assert(dl_session_get_state(first) == DL_SESSION_ACTIVE);
+    assert(strcmp(dl_seat_active_session_id(seat), first_id) == 0);
+
+    /* A seat has exactly one active session; switching deactivates the old. */
+    assert(dl_session_activate(manager, dl_session_id(second)) == DL_OK);
+    assert(dl_session_get_state(first) == DL_SESSION_OPEN);
+    assert(dl_session_get_state(second) == DL_SESSION_ACTIVE);
+    assert(strcmp(dl_seat_active_session_id(seat), dl_session_id(second)) == 0);
+    assert(dl_seat_session_count(seat) == 2);
+
+    assert(dl_session_deactivate(manager, dl_session_id(second)) == DL_OK);
+    assert(dl_session_get_state(second) == DL_SESSION_OPEN);
+    assert(dl_seat_active_session_id(seat) == NULL);
+    assert(dl_session_activate(manager, dl_session_id(second)) == DL_OK);
 
     assert(dl_session_close(manager, first_id) == DL_OK);
     assert(dl_session_close(manager, first_id) == DL_OK);
@@ -67,6 +86,12 @@ int main(void)
     user = dl_user_find(manager, 1000);
     assert(dl_user_active_session_count(user) == 1);
     assert(dl_session_activate(manager, first_id) == DL_ERR_STATE);
+    assert(dl_seat_session_count(seat) == 1);
+    assert(strcmp(dl_seat_active_session_id(seat), dl_session_id(second)) == 0);
+
+    assert(dl_session_close(manager, dl_session_id(second)) == DL_OK);
+    assert(dl_seat_session_count(seat) == 0);
+    assert(dl_seat_active_session_id(seat) == NULL);
 
     assert(dl_user_set_linger(manager, 1000, true) == DL_OK);
     assert(dl_user_linger_enabled(dl_user_find(manager, 1000)));
@@ -78,10 +103,18 @@ int main(void)
     assert(dl_user_find(manager, 2000) != NULL);
     assert(dl_user_active_session_count(dl_user_find(manager, 2000)) == 0);
 
-    /* Reject incomplete process identities and unsafe metadata. */
-    spec = make_spec(3000, 88, 0, 123);
-    assert(dl_session_create(manager, &spec, &first) == DL_ERR_INVALID);
+    /* Sessions without a seat are valid and do not create a phantom seat. */
     spec = make_spec(3000, 88, 900, 123);
+    spec.seat = NULL;
+    assert(dl_session_create(manager, &spec, &first) == DL_OK);
+    assert(dl_seat_find(manager, "seat1") == NULL);
+    assert(dl_session_activate(manager, dl_session_id(first)) == DL_OK);
+    assert(dl_session_close(manager, dl_session_id(first)) == DL_OK);
+
+    /* Reject incomplete process identities and unsafe metadata. */
+    spec = make_spec(4000, 88, 0, 123);
+    assert(dl_session_create(manager, &spec, &first) == DL_ERR_INVALID);
+    spec = make_spec(4000, 88, 900, 123);
     spec.tty = "tty\nmalformed";
     assert(dl_session_create(manager, &spec, &first) == DL_ERR_INVALID);
 

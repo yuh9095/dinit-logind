@@ -14,6 +14,13 @@ struct dl_user {
     struct dl_user *next;
 };
 
+struct dl_seat {
+    char id[DL_METADATA_MAX];
+    struct dl_session *active_session;
+    uint32_t sessions;
+    struct dl_seat *next;
+};
+
 struct dl_session {
     char id[DL_SESSION_ID_MAX];
     uint32_t uid;
@@ -30,11 +37,13 @@ struct dl_session {
     char remote_user[DL_METADATA_MAX];
     char remote_host[DL_METADATA_MAX];
     struct dl_user *user;
+    struct dl_seat *seat_object;
     struct dl_session *next;
 };
 
 struct dl_manager {
     struct dl_user *users;
+    struct dl_seat *seats;
     struct dl_session *sessions;
     uint64_t next_session_number;
 };
@@ -58,6 +67,34 @@ static struct dl_user *get_or_create_user(dl_manager *manager, uint32_t uid)
     user->next = manager->users;
     manager->users = user;
     return user;
+}
+
+static struct dl_seat *find_seat_mut(dl_manager *manager, const char *seat_id)
+{
+    struct dl_seat *seat;
+    if (seat_id == NULL || seat_id[0] == '\0') return NULL;
+    for (seat = manager->seats; seat != NULL; seat = seat->next) {
+        if (strcmp(seat->id, seat_id) == 0) return seat;
+    }
+    return NULL;
+}
+
+static struct dl_seat *get_or_create_seat(dl_manager *manager,
+                                          const char *seat_id)
+{
+    struct dl_seat *seat;
+    size_t length;
+    if (seat_id == NULL || seat_id[0] == '\0') return NULL;
+    seat = find_seat_mut(manager, seat_id);
+    if (seat != NULL) return seat;
+    length = strlen(seat_id);
+    if (length >= DL_METADATA_MAX) return NULL;
+    seat = calloc(1, sizeof(*seat));
+    if (seat == NULL) return NULL;
+    memcpy(seat->id, seat_id, length + 1);
+    seat->next = manager->seats;
+    manager->seats = seat;
+    return seat;
 }
 
 static bool valid_text(const char *value)
@@ -109,6 +146,7 @@ void dl_manager_destroy(dl_manager *manager)
 {
     struct dl_session *session;
     struct dl_user *user;
+    struct dl_seat *seat;
     if (manager == NULL) return;
     session = manager->sessions;
     while (session != NULL) {
@@ -122,6 +160,12 @@ void dl_manager_destroy(dl_manager *manager)
         free(user);
         user = next;
     }
+    seat = manager->seats;
+    while (seat != NULL) {
+        struct dl_seat *next = seat->next;
+        free(seat);
+        seat = next;
+    }
     free(manager);
 }
 
@@ -130,6 +174,7 @@ dl_result dl_session_create(dl_manager *manager, const dl_session_spec *spec,
 {
     struct dl_session *session;
     struct dl_user *user;
+    struct dl_seat *seat = NULL;
     if (out_session != NULL) *out_session = NULL;
     if (manager == NULL || spec == NULL || out_session == NULL ||
         !valid_identity(&spec->leader) ||
@@ -146,20 +191,9 @@ dl_result dl_session_create(dl_manager *manager, const dl_session_spec *spec,
         }
     }
     if (manager->next_session_number == UINT64_MAX) return DL_ERR_STATE;
-    user = get_or_create_user(manager, spec->uid);
-    if (user == NULL) return DL_ERR_NOMEM;
+
     session = calloc(1, sizeof(*session));
     if (session == NULL) return DL_ERR_NOMEM;
-
-    ++manager->next_session_number;
-    (void)snprintf(session->id, sizeof(session->id), "session-%llu",
-                   (unsigned long long)manager->next_session_number);
-    session->uid = spec->uid;
-    session->leader = spec->leader;
-    session->state = DL_SESSION_OPEN;
-    session->vtnr = spec->vtnr;
-    session->remote = spec->remote;
-    session->user = user;
     if (!copy_text(session->seat, spec->seat) ||
         !copy_text(session->tty, spec->tty) ||
         !copy_text(session->display, spec->display) ||
@@ -171,9 +205,42 @@ dl_result dl_session_create(dl_manager *manager, const dl_session_spec *spec,
         free(session);
         return DL_ERR_INVALID;
     }
+
+    user = get_or_create_user(manager, spec->uid);
+    if (user == NULL) {
+        free(session);
+        return DL_ERR_NOMEM;
+    }
+    if (user->active_sessions == UINT32_MAX) {
+        free(session);
+        return DL_ERR_STATE;
+    }
+    if (session->seat[0] != '\0') {
+        seat = get_or_create_seat(manager, session->seat);
+        if (seat == NULL) {
+            free(session);
+            return DL_ERR_NOMEM;
+        }
+        if (seat->sessions == UINT32_MAX) {
+            free(session);
+            return DL_ERR_STATE;
+        }
+    }
+
+    ++manager->next_session_number;
+    (void)snprintf(session->id, sizeof(session->id), "session-%llu",
+                   (unsigned long long)manager->next_session_number);
+    session->uid = spec->uid;
+    session->leader = spec->leader;
+    session->state = DL_SESSION_OPEN;
+    session->vtnr = spec->vtnr;
+    session->remote = spec->remote;
+    session->user = user;
+    session->seat_object = seat;
     session->next = manager->sessions;
     manager->sessions = session;
     ++user->active_sessions;
+    if (seat != NULL) ++seat->sessions;
     *out_session = session;
     return DL_OK;
 }
@@ -205,6 +272,12 @@ dl_result dl_session_close(dl_manager *manager, const char *session_id)
     struct dl_session *session = dl_session_find(manager, session_id);
     if (session == NULL) return DL_ERR_NOT_FOUND;
     if (session->state == DL_SESSION_CLOSED) return DL_OK;
+    if (session->seat_object != NULL) {
+        if (session->seat_object->active_session == session)
+            session->seat_object->active_session = NULL;
+        if (session->seat_object->sessions > 0)
+            --session->seat_object->sessions;
+    }
     session->state = DL_SESSION_CLOSED;
     if (session->user->active_sessions > 0) --session->user->active_sessions;
     return DL_OK;
@@ -215,7 +288,26 @@ dl_result dl_session_activate(dl_manager *manager, const char *session_id)
     struct dl_session *session = dl_session_find(manager, session_id);
     if (session == NULL) return DL_ERR_NOT_FOUND;
     if (session->state == DL_SESSION_CLOSED) return DL_ERR_STATE;
+    if (session->seat_object != NULL &&
+        session->seat_object->active_session != session) {
+        if (session->seat_object->active_session != NULL)
+            session->seat_object->active_session->state = DL_SESSION_OPEN;
+        session->seat_object->active_session = session;
+    }
     session->state = DL_SESSION_ACTIVE;
+    return DL_OK;
+}
+
+dl_result dl_session_deactivate(dl_manager *manager, const char *session_id)
+{
+    struct dl_session *session = dl_session_find(manager, session_id);
+    if (session == NULL) return DL_ERR_NOT_FOUND;
+    if (session->state == DL_SESSION_CLOSED) return DL_ERR_STATE;
+    if (session->seat_object != NULL &&
+        session->seat_object->active_session == session)
+        session->seat_object->active_session = NULL;
+    if (session->state == DL_SESSION_ACTIVE)
+        session->state = DL_SESSION_OPEN;
     return DL_OK;
 }
 
@@ -240,6 +332,32 @@ const char *dl_session_class(const dl_session *s) { return s == NULL ? NULL : s-
 bool dl_session_is_remote(const dl_session *s) { return s != NULL && s->remote; }
 const char *dl_session_remote_user(const dl_session *s) { return s == NULL ? NULL : s->remote_user; }
 const char *dl_session_remote_host(const dl_session *s) { return s == NULL ? NULL : s->remote_host; }
+
+const dl_seat *dl_seat_find(const dl_manager *manager, const char *seat_id)
+{
+    const struct dl_seat *seat;
+    if (manager == NULL || seat_id == NULL) return NULL;
+    for (seat = manager->seats; seat != NULL; seat = seat->next) {
+        if (strcmp(seat->id, seat_id) == 0) return seat;
+    }
+    return NULL;
+}
+
+const char *dl_seat_id(const dl_seat *seat)
+{
+    return seat == NULL ? NULL : seat->id;
+}
+
+const char *dl_seat_active_session_id(const dl_seat *seat)
+{
+    return seat == NULL || seat->active_session == NULL
+               ? NULL : seat->active_session->id;
+}
+
+uint32_t dl_seat_session_count(const dl_seat *seat)
+{
+    return seat == NULL ? 0 : seat->sessions;
+}
 
 dl_result dl_user_set_linger(dl_manager *manager, uint32_t uid, bool enabled)
 {

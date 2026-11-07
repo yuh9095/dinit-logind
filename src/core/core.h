@@ -17,6 +17,7 @@ extern "C" {
 typedef struct dl_manager dl_manager;
 typedef struct dl_user dl_user;
 typedef struct dl_session dl_session;
+typedef struct dl_seat dl_seat;
 
 typedef enum {
     DL_OK = 0,
@@ -65,6 +66,7 @@ dl_result dl_session_create(dl_manager *manager, const dl_session_spec *spec,
                             dl_session **out_session);
 dl_result dl_session_close(dl_manager *manager, const char *session_id);
 dl_result dl_session_activate(dl_manager *manager, const char *session_id);
+dl_result dl_session_deactivate(dl_manager *manager, const char *session_id);
 
 dl_session *dl_session_find(dl_manager *manager, const char *session_id);
 dl_session *dl_session_find_by_identity(dl_manager *manager,
@@ -84,6 +86,14 @@ const char *dl_session_class(const dl_session *session);
 bool dl_session_is_remote(const dl_session *session);
 const char *dl_session_remote_user(const dl_session *session);
 const char *dl_session_remote_host(const dl_session *session);
+
+/* Seat objects are manager-owned and created lazily when a session names a
+ * seat. A seat's session count excludes CLOSED sessions. At most one session
+ * per seat may be ACTIVE; activating another session deactivates the former. */
+const dl_seat *dl_seat_find(const dl_manager *manager, const char *seat_id);
+const char *dl_seat_id(const dl_seat *seat);
+const char *dl_seat_active_session_id(const dl_seat *seat);
+uint32_t dl_seat_session_count(const dl_seat *seat);
 
 dl_result dl_user_set_linger(dl_manager *manager, uint32_t uid, bool enabled);
 const dl_user *dl_user_find(const dl_manager *manager, uint32_t uid);
