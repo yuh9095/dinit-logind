@@ -1,28 +1,28 @@
-# Core and session model
+# Core, enumeration, events, and PAM session lifecycle
 
-Status: initial implementation contract; the first core implementation and Linux process identity reader are now present.
+Status: the manager owns User, Seat, and Session records. The Linux PAM ingress creates and closes sessions through this core; login1 D-Bus publication is a later adapter.
 
-## Ownership
+## Ownership and threading
 
-The manager is the sole owner of every User and Session object. Adapters receive borrowed pointers and must not free objects or mutate their fields. The manager retains closed Session records until manager destruction in this initial implementation; this makes repeated release requests safe and keeps returned session IDs from being recycled during the daemon lifetime.
+The manager is the sole owner of every User, Seat, and Session object. Adapter pointers are borrowed and remain valid until manager destruction. Calls are serialized on one owner thread; the core is not internally thread-safe.
 
-A User is keyed by the numeric UID. A User may exist before its first session (for example, because linger was configured), and remains present until manager destruction. Its active session count is derived only from sessions not in CLOSED state.
+Closed Session records remain allocated until manager destruction. This preserves stable IDs and makes repeated close requests safe. Enumeration APIs return borrowed pointers and are only stable until the next manager mutation.
 
-## Session identity
+## User model
 
-A session has a daemon-generated stable ID and an authenticated UID. Its leader identity is a tuple:
+A User is keyed by numeric UID. It may exist before its first session (for example, because linger is configured) and remains present until manager destruction. Its session count includes all sessions not in CLOSED state. The legacy `dl_user_active_session_count()` accessor remains as a source-compatible alias for this count.
 
-- PID obtained from authenticated peer credentials;
-- PID namespace inode from /proc/PID/ns/pid;
-- process start time (clock ticks since boot) from field 22 of /proc/PID/stat.
+## Seat model
 
-PID alone is never an identity. The tuple prevents accidental matching across PID namespaces and PID reuse. The Linux reader opens the process directory once, reads the start time twice, and rejects inconsistent or inaccessible procfs state. The PAM/socket ingress must still bind the PID to authenticated peer credentials and obtain the UID independently; procfs identity acquisition is not authentication or authorization.
+A Seat is manager-owned and keyed by its seat ID. Seats are created lazily when a session is associated with one. A Seat tracks its live session count and at most one active Session. Activating another Session on the same Seat deactivates the previous active Session. Seats remain represented after their session count reaches zero; physical device discovery and seat removal are not implemented yet.
 
-The tuple is intentionally not an exposed stable ABI. A future pidfd integration may strengthen liveness checks, but must retain a fallback for kernels/libcs without pidfd support. A zero process start-time value is not rejected by the core because it can be a valid kernel value on very early systems.
+The PAM ingress only maps a local canonical Linux virtual-console TTY (`/dev/tty1` through `/dev/tty63`) to `seat0`. Pseudo-terminals, serial devices, remote sessions, and arbitrary TTY labels are not assigned to a seat. The daemon derives VT number from the TTY path and rejects a nonzero client-supplied VT number that disagrees. This is intentionally conservative; device-based seat assignment will replace this limited mapping when the device backend is implemented.
 
-## Metadata
+## Session identity and metadata
 
-Session metadata includes seat, VT number, TTY, display, service, session type, session class, remote flag, and remote user/host labels. Metadata is copied into manager-owned bounded storage at creation. Optional fields may be empty. The core validates lengths and rejects control characters; semantic checks such as whether a seat or VT exists belong to the corresponding adapter/policy module.
+A Session has a daemon-generated ID and authenticated UID. Its leader identity is a tuple of PID from kernel peer credentials, PID namespace inode, and process start time from procfs. PID alone is never treated as identity. The tuple avoids accidental matches across PID namespaces and PID reuse.
+
+Metadata is copied into bounded manager-owned storage at creation. Optional metadata accessors return NULL when the field is absent. The core rejects overlong strings and control characters. Seat/VT semantic checks belong to platform adapters.
 
 ## Lifecycle
 
@@ -37,36 +37,37 @@ Session metadata includes seat, VT number, TTY, display, service, session type, 
 
 - Creation produces OPEN.
 - Activation is allowed from OPEN and is idempotent in ACTIVE.
-- Close is allowed from OPEN or ACTIVE.
-- Closing an already CLOSED session succeeds without changing state.
-- CLOSED is terminal.
-- No core operation starts or stops a Dinit service. Such work is requested through a separate backend after the state/policy decision.
+- A Seat has at most one active Session; switching sessions changes both Session states.
+- Deactivation returns ACTIVE to OPEN.
+- Close is allowed from OPEN or ACTIVE; CLOSED is terminal.
+- Repeated close is successful and produces no duplicate event.
+- The core never starts or stops a Dinit service. That belongs to a separate policy/backend layer.
 
-The core emits no callbacks in this first slice. This avoids re-entrancy and callback lifetime hazards before the event-loop contract is selected. Later event publication must use immutable snapshots or explicitly retained references.
+## Enumeration
 
-## PAM lifetime
+The manager provides count/index accessors for Users, Seats, and live Sessions. Session enumeration excludes CLOSED records. User and Seat enumeration includes manager-owned records even when they currently have no sessions. These APIs are intended for building a consistent login1 object snapshot; callers must serialize enumeration with mutations on the owner thread.
 
-The PAM adapter will own the transport/channel and associate its lifetime with the created session. On orderly PAM close or channel disconnect it asks core to close the session. Duplicate close/disconnect notifications are harmless. Core does not store a raw file descriptor or PAM handle.
+## Event journal
 
-A daemon restart loses in-memory records; persistence/recovery is deliberately not part of this first implementation. Stale runtime directories and crash recovery will be handled by the runtime module.
+The core exposes a bounded, non-destructive event journal with monotonically increasing generation numbers. Each consumer tracks its own cursor; reading events does not consume them for other consumers. Events include User/Seat/Session creation, Session state changes/removal, Seat active-session changes, and User linger changes.
 
-## Concurrency and teardown
+The journal retains the newest 256 events. If a consumer's cursor falls behind retained history, `dl_manager_next_event()` returns `DL_ERR_STATE` and an `DL_EVENT_OVERFLOW` marker with the current generation. The consumer must rebuild its object snapshot and resume from that generation. This avoids callbacks, re-entrancy, and subscriber lifetime hazards while providing a bridge to future D-Bus `PropertiesChanged`, `SessionNew`, `SessionRemoved`, and Seat state signals.
 
-The first implementation is single-owner-thread code and is not internally thread-safe. All calls must be serialized by the daemon's eventual event loop. Worker threads must marshal results back to that owner thread and must not retain borrowed pointers across asynchronous boundaries.
+## PAM lifetime integration
 
-Shutdown order: stop accepting PAM/D-Bus ingress; cancel or drain asynchronous adapter work; destroy the manager; then release platform adapters. Manager destruction invalidates all borrowed User/Session pointers.
+The PAM module opens a persistent Unix stream connection to the daemon and retains it for the PAM session lifetime. The daemon authenticates the peer using kernel-supplied Unix socket credentials, validates the request and target UID, binds the process identity to the peer PID, creates the core Session, and replies with its ID. The daemon retains a duplicate of the socket after sending the response. Orderly PAM close or client disconnect closes the core Session and publishes the corresponding core events.
 
-## User and linger
+The peer UID authenticates the PAM helper; it is deliberately not required to equal the target login UID because privileged PAM stacks commonly create sessions for another account. This is authentication metadata, not authorization for future privileged login1 methods.
 
-Users are keyed by UID. Linger is a persistent boolean in manager memory in this slice; persistence and policy authorization are deferred to the user/runtime adapter. Enabling linger may create a User without sessions. Closing the last session does not remove the User and does not implicitly clear linger.
+## Persistence and recovery
+
+The in-memory manager is lost on daemon restart. Runtime directory and linger marker persistence are handled by the runtime module; restoring live sessions after a daemon crash is not attempted. Stale runtime cleanup and robust crash recovery remain separate work.
 
 ## Deliberately deferred
 
-- D-Bus object paths and login1 wire compatibility;
-- PAM module and socket protocol;
-- runtime directory creation;
-- NSS/userdb records beyond UID identity;
-- seat/VT/device state;
-- pidfd ownership and process-exit monitoring;
-- persistent linger storage;
-- multi-threaded access and event-loop integration.
+- login1 D-Bus object paths, method/property/signal wire compatibility;
+- physical seat discovery, device assignment, VT switching and seat removal;
+- pidfd ownership and independent process-exit monitoring;
+- authorization policy and Polkit integration;
+- Dinit service lifecycle operations;
+- multi-threaded access.

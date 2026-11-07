@@ -51,6 +51,22 @@ static bool request_valid(const dl_pam_open_request *r)
            field_valid(r->session_class);
 }
 
+static uint32_t tty_vtnr(const char *tty)
+{
+    const char *digits;
+    uint32_t value;
+    if (tty == NULL || strncmp(tty, "/dev/tty", 8) != 0) return 0;
+    digits = tty + 8;
+    if (digits[0] < '1' || digits[0] > '9') return 0;
+    value = (uint32_t)(digits[0] - '0');
+    if (digits[1] != '\0') {
+        if (digits[1] < '0' || digits[1] > '9' || digits[2] != '\0')
+            return 0;
+        value = value * 10u + (uint32_t)(digits[1] - '0');
+    }
+    return value <= 63u ? value : 0;
+}
+
 static bool uid_exists(uint32_t uid)
 {
     struct passwd pwd, *result = NULL;
@@ -117,6 +133,7 @@ dl_result dl_pam_ingress_step(dl_pam_ingress *ingress, bool *complete)
 {
     dl_result result;
     dl_session_spec spec;
+    uint32_t parsed_vtnr;
     ssize_t n;
 
     if (complete != NULL) *complete = false;
@@ -137,9 +154,16 @@ dl_result dl_pam_ingress_step(dl_pam_ingress *ingress, bool *complete)
     if (!request_valid(&ingress->request) || !uid_exists(ingress->request.uid))
         return DL_ERR_INVALID;
 
+    parsed_vtnr = tty_vtnr(ingress->request.tty);
+    if (ingress->request.vtnr != 0 &&
+        ingress->request.vtnr != parsed_vtnr)
+        return DL_ERR_INVALID;
+
     memset(&spec, 0, sizeof(spec));
     spec.uid = ingress->request.uid;
-    spec.vtnr = ingress->request.vtnr;
+    spec.vtnr = parsed_vtnr;
+    spec.seat = (!ingress->request.remote && parsed_vtnr != 0)
+                    ? "seat0" : NULL;
     spec.remote = ingress->request.remote != 0;
     spec.service = ingress->request.service;
     spec.tty = ingress->request.tty;

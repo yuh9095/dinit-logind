@@ -5,6 +5,7 @@
 #define DINIT_LOGIND_CORE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -13,6 +14,7 @@ extern "C" {
 
 #define DL_SESSION_ID_MAX 32
 #define DL_METADATA_MAX 128
+#define DL_EVENT_HISTORY_MAX 256
 
 typedef struct dl_manager dl_manager;
 typedef struct dl_user dl_user;
@@ -34,8 +36,18 @@ typedef enum {
     DL_SESSION_CLOSED
 } dl_session_state;
 
-/* Must be populated from authenticated peer credentials and verified by the
- * Linux adapter. PID alone is deliberately insufficient. */
+typedef enum {
+    DL_EVENT_NONE = 0,
+    DL_EVENT_OVERFLOW,
+    DL_EVENT_USER_ADDED,
+    DL_EVENT_SEAT_ADDED,
+    DL_EVENT_SESSION_ADDED,
+    DL_EVENT_SESSION_STATE_CHANGED,
+    DL_EVENT_SESSION_REMOVED,
+    DL_EVENT_SEAT_ACTIVE_SESSION_CHANGED,
+    DL_EVENT_USER_LINGER_CHANGED
+} dl_event_type;
+
 typedef struct {
     uint32_t pid;
     uint64_t pid_namespace_inode;
@@ -57,8 +69,17 @@ typedef struct {
     const char *remote_host;
 } dl_session_spec;
 
-/* All returned object pointers are borrowed from manager and remain valid
- * until dl_manager_destroy(). Calls must be serialized on one owner thread. */
+typedef struct {
+    uint64_t generation;
+    dl_event_type type;
+    uint32_t uid;
+    dl_session_state old_state;
+    dl_session_state new_state;
+    char session_id[DL_SESSION_ID_MAX];
+    char seat_id[DL_METADATA_MAX];
+    char active_session_id[DL_SESSION_ID_MAX];
+} dl_event;
+
 dl_manager *dl_manager_new(void);
 void dl_manager_destroy(dl_manager *manager);
 
@@ -67,7 +88,6 @@ dl_result dl_session_create(dl_manager *manager, const dl_session_spec *spec,
 dl_result dl_session_close(dl_manager *manager, const char *session_id);
 dl_result dl_session_activate(dl_manager *manager, const char *session_id);
 dl_result dl_session_deactivate(dl_manager *manager, const char *session_id);
-
 dl_session *dl_session_find(dl_manager *manager, const char *session_id);
 dl_session *dl_session_find_by_identity(dl_manager *manager,
                                         const dl_process_identity *identity);
@@ -87,9 +107,14 @@ bool dl_session_is_remote(const dl_session *session);
 const char *dl_session_remote_user(const dl_session *session);
 const char *dl_session_remote_host(const dl_session *session);
 
-/* Seat objects are manager-owned and created lazily when a session names a
- * seat. A seat's session count excludes CLOSED sessions. At most one session
- * per seat may be ACTIVE; activating another session deactivates the former. */
+/* Enumeration is stable only until the next manager mutation. */
+size_t dl_manager_user_count(const dl_manager *manager);
+const dl_user *dl_manager_user_at(const dl_manager *manager, size_t index);
+size_t dl_manager_seat_count(const dl_manager *manager);
+const dl_seat *dl_manager_seat_at(const dl_manager *manager, size_t index);
+size_t dl_manager_session_count(const dl_manager *manager);
+const dl_session *dl_manager_session_at(const dl_manager *manager, size_t index);
+
 const dl_seat *dl_seat_find(const dl_manager *manager, const char *seat_id);
 const char *dl_seat_id(const dl_seat *seat);
 const char *dl_seat_active_session_id(const dl_seat *seat);
@@ -97,11 +122,20 @@ uint32_t dl_seat_session_count(const dl_seat *seat);
 
 dl_result dl_user_set_linger(dl_manager *manager, uint32_t uid, bool enabled);
 const dl_user *dl_user_find(const dl_manager *manager, uint32_t uid);
+uint32_t dl_user_uid(const dl_user *user);
 bool dl_user_linger_enabled(const dl_user *user);
+uint32_t dl_user_session_count(const dl_user *user);
 uint32_t dl_user_active_session_count(const dl_user *user);
+
+/* Bounded, non-destructive event journal. Each subscriber keeps a cursor.
+ * DL_ERR_NOT_FOUND means no new event. DL_ERR_STATE with OVERFLOW means the
+ * cursor fell behind retained history; resnapshot and resume at generation. */
+uint64_t dl_manager_event_generation(const dl_manager *manager);
+dl_result dl_manager_next_event(const dl_manager *manager,
+                                uint64_t after_generation,
+                                dl_event *out_event);
 
 #ifdef __cplusplus
 }
 #endif
-
 #endif

@@ -47,6 +47,22 @@ static int copy_item(char dst[DL_PAM_FIELD_MAX], const char *src)
     return PAM_SUCCESS;
 }
 
+static uint32_t tty_vtnr(const char *tty)
+{
+    const char *digits;
+    uint32_t value;
+    if (tty == NULL || strncmp(tty, "/dev/tty", 8) != 0) return 0;
+    digits = tty + 8;
+    if (digits[0] < '1' || digits[0] > '9') return 0;
+    value = (uint32_t)(digits[0] - '0');
+    if (digits[1] != '\0') {
+        if (digits[1] < '0' || digits[1] > '9' || digits[2] != '\0')
+            return 0;
+        value = value * 10u + (uint32_t)(digits[1] - '0');
+    }
+    return value <= 63u ? value : 0;
+}
+
 static int lookup_uid(const char *name, uint32_t *uid)
 {
     struct passwd pwd, *result = NULL;
@@ -143,6 +159,7 @@ PAM_EXTERN int pam_sm_open_session(pam_handle_t *pamh, int flags,
         copy_item(request.session_class, session_class) != PAM_SUCCESS)
         return PAM_SERVICE_ERR;
     request.remote = rhost != NULL && rhost[0] != '\0';
+    request.vtnr = tty_vtnr(request.tty);
 
     fd = connect_daemon();
     if (fd < 0) return PAM_SESSION_ERR;
