@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 /* SPDX-License-Identifier: MIT
  * Copyright (c) 2026 dinit-logind contributors
  */
