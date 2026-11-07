@@ -11,6 +11,9 @@ extern "C" {
 typedef struct {
     sd_bus *bus;
     sd_bus_slot *manager_slot;
+    sd_bus_slot *session_slot;
+    sd_bus_slot *user_slot;
+    sd_bus_slot *seat_slot;
 } dl_dbus;
 int dl_dbus_open(dl_dbus *dbus, dl_manager *manager);
 int dl_dbus_process(dl_dbus *dbus);

@@ -30,7 +30,7 @@ static int make_object_path(const char *kind, const char *id,
     used = (size_t)n;
     for (p = (const unsigned char *)id; *p; ++p) {
         if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
-            (*p >= '0' && *p <= '9') || *p == '_') {
+            (*p >= '0' && *p <= '9')  ) {
             if (used + 1 >= size) return -ENAMETOOLONG;
             buffer[used++] = (char)*p;
         } else {
@@ -192,6 +192,300 @@ static int method_list_seats(sd_bus_message *m, void *userdata,
     return r;
 }
 
+
+
+static int decode_component(const char *path, const char *prefix,
+                            char *out, size_t out_size)
+{
+    size_t used = 0;
+    const char *p;
+    if (!path || !prefix || !out || strncmp(path, prefix, strlen(prefix)) != 0)
+        return -EINVAL;
+    p = path + strlen(prefix);
+    if (*p == '\0' || strchr(p, '/') != NULL) return -EINVAL;
+    while (*p) {
+        unsigned int value;
+        if (*p == '_') {
+            char hex[3];
+            char *end = NULL;
+            if (!p[1] || !p[2]) return -EINVAL;
+            hex[0] = p[1]; hex[1] = p[2]; hex[2] = '\0';
+            value = (unsigned int)strtoul(hex, &end, 16);
+            if (end == hex || *end != '\0' || value == 0) return -EINVAL;
+            p += 3;
+        } else {
+            value = (unsigned char)*p++;
+        }
+        if (used + 1 >= out_size) return -ENAMETOOLONG;
+        out[used++] = (char)value;
+    }
+    out[used] = '\0';
+    return 0;
+}
+
+static int path_for_user(uint32_t uid, char *path, size_t size)
+{
+    char id[32];
+    (void)snprintf(id, sizeof(id), "%u", (unsigned int)uid);
+    return make_object_path("user", id, path, size);
+}
+
+static int property_unknown(sd_bus_error *error, const char *name)
+{
+    return sd_bus_error_setf(error, "org.freedesktop.DBus.Error.UnknownProperty",
+                             "Unknown property '%s'", name);
+}
+
+static int session_property(sd_bus *bus, const char *path, const char *interface,
+                            const char *property, sd_bus_message *reply,
+                            void *userdata, sd_bus_error *error)
+{
+    struct dbus_context *ctx = userdata;
+    char id[DL_SESSION_ID_MAX], object[256], username[256];
+    dl_session *session;
+    uint32_t uid;
+    int r;
+    (void)bus; (void)interface;
+    r = decode_component(path, DL_LOGIN1_PATH "/session/", id, sizeof(id));
+    if (r < 0 || !(session = dl_session_find(ctx->manager, id)))
+        return sd_bus_error_set_const(error, "org.freedesktop.login1.NoSuchSession",
+                                      "Session no longer exists");
+    uid = dl_session_uid(session);
+    if (strcmp(property, "Id") == 0)
+        return sd_bus_message_append(reply, "s", dl_session_id(session));
+    if (strcmp(property, "User") == 0) {
+        if (path_for_user(uid, object, sizeof(object)) < 0) return -EINVAL;
+        return sd_bus_message_append(reply, "(uo)", uid, object);
+    }
+    if (strcmp(property, "Name") == 0) {
+        if (uid_to_name(uid, username, sizeof(username)) < 0) return -EINVAL;
+        return sd_bus_message_append(reply, "s", username);
+    }
+    if (strcmp(property, "Timestamp") == 0 ||
+        strcmp(property, "TimestampMonotonic") == 0 ||
+        strcmp(property, "LeaderPIDFDId") == 0)
+        return sd_bus_message_append(reply, "t", (uint64_t)0);
+    if (strcmp(property, "VTNr") == 0)
+        return sd_bus_message_append(reply, "u", dl_session_vtnr(session));
+    if (strcmp(property, "Seat") == 0) {
+        const char *seat = dl_session_seat(session);
+        if (seat && make_object_path("seat", seat, object, sizeof(object)) < 0)
+            return -EINVAL;
+        return sd_bus_message_append(reply, "(so)", seat ? seat : "",
+                                     seat ? object : "/");
+    }
+    if (strcmp(property, "TTY") == 0)
+        return sd_bus_message_append(reply, "s", dl_session_tty(session) ?
+                                     dl_session_tty(session) : "");
+    if (strcmp(property, "Display") == 0)
+        return sd_bus_message_append(reply, "s", dl_session_display(session) ?
+                                     dl_session_display(session) : "");
+    if (strcmp(property, "Remote") == 0)
+        return sd_bus_message_append(reply, "b", dl_session_is_remote(session));
+    if (strcmp(property, "RemoteHost") == 0)
+        return sd_bus_message_append(reply, "s", dl_session_remote_host(session) ?
+                                     dl_session_remote_host(session) : "");
+    if (strcmp(property, "RemoteUser") == 0)
+        return sd_bus_message_append(reply, "s", dl_session_remote_user(session) ?
+                                     dl_session_remote_user(session) : "");
+    if (strcmp(property, "Service") == 0)
+        return sd_bus_message_append(reply, "s", dl_session_service(session) ?
+                                     dl_session_service(session) : "");
+    if (strcmp(property, "Leader") == 0)
+        return sd_bus_message_append(reply, "u", dl_session_leader(session).pid);
+    if (strcmp(property, "Type") == 0)
+        return sd_bus_message_append(reply, "s", dl_session_type(session) ?
+                                     dl_session_type(session) : "");
+    if (strcmp(property, "Class") == 0)
+        return sd_bus_message_append(reply, "s", dl_session_class(session) ?
+                                     dl_session_class(session) : "");
+    if (strcmp(property, "Active") == 0)
+        return sd_bus_message_append(reply, "b",
+                                     dl_session_get_state(session) == DL_SESSION_ACTIVE);
+    if (strcmp(property, "State") == 0)
+        return sd_bus_message_append(reply, "s",
+            dl_session_get_state(session) == DL_SESSION_ACTIVE ? "active" : "online");
+    if (strcmp(property, "CanIdle") == 0 || strcmp(property, "CanLock") == 0 ||
+        strcmp(property, "LockedHint") == 0 || strcmp(property, "IdleHint") == 0)
+        return sd_bus_message_append(reply, "b", 0);
+    if (strcmp(property, "IdleSinceHint") == 0 ||
+        strcmp(property, "IdleSinceHintMonotonic") == 0)
+        return sd_bus_message_append(reply, "t", (uint64_t)0);
+    return property_unknown(error, property);
+}
+
+static int user_property(sd_bus *bus, const char *path, const char *interface,
+                         const char *property, sd_bus_message *reply,
+                         void *userdata, sd_bus_error *error)
+{
+    struct dbus_context *ctx = userdata;
+    char id[32], *end = NULL, name[256], object[256];
+    unsigned long parsed;
+    const dl_user *user;
+    struct passwd pwd, *result = NULL;
+    char scratch[16384];
+    size_t i;
+    int r;
+    (void)bus; (void)interface;
+    r = decode_component(path, DL_LOGIN1_PATH "/user/", id, sizeof(id));
+    if (r < 0) return property_unknown(error, property);
+    errno = 0;
+    parsed = strtoul(id, &end, 10);
+    if (errno || end == id || *end || parsed > UINT32_MAX)
+        return property_unknown(error, property);
+    user = dl_user_find(ctx->manager, (uint32_t)parsed);
+    if (!user) return sd_bus_error_set_const(error, "org.freedesktop.login1.NoSuchUser",
+                                              "User no longer exists");
+    if (strcmp(property, "UID") == 0)
+        return sd_bus_message_append(reply, "u", (uint32_t)parsed);
+    if (strcmp(property, "GID") == 0) {
+        r = getpwuid_r((uid_t)parsed, &pwd, scratch, sizeof(scratch), &result);
+        return sd_bus_message_append(reply, "u",
+            r == 0 && result ? (uint32_t)result->pw_gid : (uint32_t)parsed);
+    }
+    if (strcmp(property, "Name") == 0) {
+        if (uid_to_name((uint32_t)parsed, name, sizeof(name)) < 0) return -EINVAL;
+        return sd_bus_message_append(reply, "s", name);
+    }
+    if (strcmp(property, "Timestamp") == 0 ||
+        strcmp(property, "TimestampMonotonic") == 0 ||
+        strcmp(property, "IdleSinceHint") == 0 ||
+        strcmp(property, "IdleSinceHintMonotonic") == 0)
+        return sd_bus_message_append(reply, "t", (uint64_t)0);
+    if (strcmp(property, "RuntimePath") == 0 ||
+        strcmp(property, "Service") == 0 || strcmp(property, "Slice") == 0 ||
+        strcmp(property, "State") == 0)
+        return sd_bus_message_append(reply, "s",
+            strcmp(property, "State") == 0 ?
+            (dl_user_active_session_count(user) ? "active" : "online") : "");
+    if (strcmp(property, "Display") == 0)
+        return sd_bus_message_append(reply, "(so)", 0u, "/");
+    if (strcmp(property, "Linger") == 0)
+        return sd_bus_message_append(reply, "b", dl_user_linger_enabled(user));
+    if (strcmp(property, "IdleHint") == 0)
+        return sd_bus_message_append(reply, "b", 0);
+    if (strcmp(property, "Sessions") == 0) {
+        r = sd_bus_message_open_container(reply, 'a', "(so)");
+        for (i = 0; r >= 0 && i < dl_manager_session_count(ctx->manager); ++i) {
+            const dl_session *s = dl_manager_session_at(ctx->manager, i);
+            if (dl_session_uid(s) != (uint32_t)parsed) continue;
+            if (make_object_path("session", dl_session_id(s), object,
+                                sizeof(object)) < 0) return -EINVAL;
+            r = sd_bus_message_append(reply, "(so)", dl_session_id(s), object);
+        }
+        if (r >= 0) r = sd_bus_message_close_container(reply);
+        return r;
+    }
+    return property_unknown(error, property);
+}
+
+static int seat_property(sd_bus *bus, const char *path, const char *interface,
+                         const char *property, sd_bus_message *reply,
+                         void *userdata, sd_bus_error *error)
+{
+    struct dbus_context *ctx = userdata;
+    char id[DL_METADATA_MAX], object[256];
+    const dl_seat *seat;
+    size_t i;
+    int r;
+    (void)bus; (void)interface;
+    r = decode_component(path, DL_LOGIN1_PATH "/seat/", id, sizeof(id));
+    if (r < 0 || !(seat = dl_seat_find(ctx->manager, id)))
+        return sd_bus_error_set_const(error, "org.freedesktop.login1.NoSuchSeat",
+                                      "Seat no longer exists");
+    if (strcmp(property, "Id") == 0)
+        return sd_bus_message_append(reply, "s", dl_seat_id(seat));
+    if (strcmp(property, "ActiveSession") == 0) {
+        const char *active = dl_seat_active_session_id(seat);
+        if (active && make_object_path("session", active, object, sizeof(object)) < 0)
+            return -EINVAL;
+        return sd_bus_message_append(reply, "(so)", active ? active : "",
+                                     active ? object : "/");
+    }
+    if (strcmp(property, "CanTTY") == 0 || strcmp(property, "CanGraphical") == 0 ||
+        strcmp(property, "IdleHint") == 0)
+        return sd_bus_message_append(reply, "b", 0);
+    if (strcmp(property, "IdleSinceHint") == 0 ||
+        strcmp(property, "IdleSinceHintMonotonic") == 0)
+        return sd_bus_message_append(reply, "t", (uint64_t)0);
+    if (strcmp(property, "Sessions") == 0) {
+        r = sd_bus_message_open_container(reply, 'a', "(so)");
+        for (i = 0; r >= 0 && i < dl_manager_session_count(ctx->manager); ++i) {
+            const dl_session *s = dl_manager_session_at(ctx->manager, i);
+            const char *session_seat = dl_session_seat(s);
+            if (!session_seat || strcmp(session_seat, id) != 0) continue;
+            if (make_object_path("session", dl_session_id(s), object,
+                                sizeof(object)) < 0) return -EINVAL;
+            r = sd_bus_message_append(reply, "(so)", dl_session_id(s), object);
+        }
+        if (r >= 0) r = sd_bus_message_close_container(reply);
+        return r;
+    }
+    return property_unknown(error, property);
+}
+
+static const sd_bus_vtable session_vtable[] = {
+    SD_BUS_VTABLE_START(0),
+    SD_BUS_PROPERTY("Id", "s", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("User", "(uo)", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Name", "s", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Timestamp", "t", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("TimestampMonotonic", "t", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("VTNr", "u", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Seat", "(so)", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("TTY", "s", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Display", "s", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Remote", "b", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("RemoteHost", "s", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("RemoteUser", "s", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Service", "s", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Leader", "u", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Type", "s", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Class", "s", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Active", "b", session_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("State", "s", session_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("CanIdle", "b", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("CanLock", "b", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("LockedHint", "b", session_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("IdleHint", "b", session_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("IdleSinceHint", "t", session_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("IdleSinceHintMonotonic", "t", session_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_VTABLE_END
+};
+
+static const sd_bus_vtable user_vtable[] = {
+    SD_BUS_VTABLE_START(0),
+    SD_BUS_PROPERTY("UID", "u", user_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("GID", "u", user_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Name", "s", user_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Timestamp", "t", user_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("TimestampMonotonic", "t", user_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("RuntimePath", "s", user_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Service", "s", user_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Slice", "s", user_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Display", "(so)", user_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("State", "s", user_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("Sessions", "a(so)", user_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("IdleHint", "b", user_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("IdleSinceHint", "t", user_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("IdleSinceHintMonotonic", "t", user_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("Linger", "b", user_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_VTABLE_END
+};
+
+static const sd_bus_vtable seat_vtable[] = {
+    SD_BUS_VTABLE_START(0),
+    SD_BUS_PROPERTY("Id", "s", seat_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("ActiveSession", "(so)", seat_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("CanTTY", "b", seat_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("CanGraphical", "b", seat_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Sessions", "a(so)", seat_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("IdleHint", "b", seat_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("IdleSinceHint", "t", seat_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("IdleSinceHintMonotonic", "t", seat_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_VTABLE_END
+};
+
 static const sd_bus_vtable manager_vtable[] = {
     SD_BUS_VTABLE_START(0),
     SD_BUS_METHOD("GetSession", "s", "o", method_get_session, SD_BUS_VTABLE_UNPRIVILEGED),
@@ -218,8 +512,38 @@ int dl_dbus_open(dl_dbus *dbus, dl_manager *manager)
                                  DL_LOGIN1_PATH, DL_LOGIN1_IFACE,
                                  manager_vtable, ctx);
     if (r < 0) { sd_bus_unref(dbus->bus); dbus->bus = NULL; free(ctx); return r; }
+    r = sd_bus_add_fallback_vtable(dbus->bus, &dbus->session_slot,
+                                   DL_LOGIN1_PATH "/session", "org.freedesktop.login1.Session",
+                                   session_vtable, ctx);
+    if (r < 0) {
+        sd_bus_slot_unref(dbus->seat_slot);
+        sd_bus_slot_unref(dbus->user_slot);
+        sd_bus_slot_unref(dbus->session_slot);
+        sd_bus_slot_unref(dbus->manager_slot);
+        sd_bus_unref(dbus->bus); dbus->bus = NULL; free(ctx); return r;
+    }
+    r = sd_bus_add_fallback_vtable(dbus->bus, &dbus->user_slot,
+                                   DL_LOGIN1_PATH "/user", "org.freedesktop.login1.User",
+                                   user_vtable, ctx);
+    if (r < 0) {
+        sd_bus_slot_unref(dbus->session_slot);
+        sd_bus_slot_unref(dbus->manager_slot);
+        sd_bus_unref(dbus->bus); dbus->bus = NULL; free(ctx); return r;
+    }
+    r = sd_bus_add_fallback_vtable(dbus->bus, &dbus->seat_slot,
+                                   DL_LOGIN1_PATH "/seat", "org.freedesktop.login1.Seat",
+                                   seat_vtable, ctx);
+    if (r < 0) {
+        sd_bus_slot_unref(dbus->user_slot);
+        sd_bus_slot_unref(dbus->session_slot);
+        sd_bus_slot_unref(dbus->manager_slot);
+        sd_bus_unref(dbus->bus); dbus->bus = NULL; free(ctx); return r;
+    }
     r = sd_bus_request_name(dbus->bus, DL_LOGIN1_NAME, 0);
     if (r < 0) {
+        sd_bus_slot_unref(dbus->seat_slot);
+        sd_bus_slot_unref(dbus->user_slot);
+        sd_bus_slot_unref(dbus->session_slot);
         sd_bus_slot_unref(dbus->manager_slot);
         sd_bus_unref(dbus->bus);
         dbus->bus = NULL;
@@ -255,10 +579,11 @@ void dl_dbus_close(dl_dbus *dbus)
 {
     struct dbus_context *ctx = NULL;
     if (!dbus) return;
-    if (dbus->manager_slot) {
-        ctx = sd_bus_slot_get_userdata(dbus->manager_slot);
-        sd_bus_slot_unref(dbus->manager_slot);
-    }
+    if (dbus->manager_slot) ctx = sd_bus_slot_get_userdata(dbus->manager_slot);
+    sd_bus_slot_unref(dbus->seat_slot);
+    sd_bus_slot_unref(dbus->user_slot);
+    sd_bus_slot_unref(dbus->session_slot);
+    sd_bus_slot_unref(dbus->manager_slot);
     sd_bus_unref(dbus->bus);
     free(ctx);
     memset(dbus, 0, sizeof(*dbus));
