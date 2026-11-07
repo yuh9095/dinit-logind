@@ -1,0 +1,12 @@
+/builddir/
+/_build/
+meson-private/
+meson-logs/
+*.o
+*.a
+*.so
+*.so.*
+*.gcda
+*.gcno
+*.gcov
+compile_commands.json
