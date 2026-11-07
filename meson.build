@@ -30,11 +30,19 @@ linux_peer_credentials_lib = static_library(
   install: false,
 )
 
-linux_pam_ingress_lib = static_library(\n  'dinit-logind-linux-pam-ingress',\n  'src/platform/linux/pam_ingress.c',\n  include_directories: include_directories('src/core', 'src/platform/linux'),\n  link_with: [core_lib, linux_identity_lib, linux_peer_credentials_lib, linux_pam_session_lib],\n  install: false,\n)\n\nlinux_pam_session_lib = static_library(
+linux_pam_session_lib = static_library(
   'dinit-logind-linux-pam-session',
   'src/platform/linux/pam_session.c',
   include_directories: include_directories('src/core', 'src/platform/linux'),
   link_with: [core_lib, linux_peer_credentials_lib],
+  install: false,
+)
+
+linux_pam_ingress_lib = static_library(
+  'dinit-logind-linux-pam-ingress',
+  'src/platform/linux/pam_ingress.c',
+  include_directories: include_directories('src/core', 'src/platform/linux'),
+  link_with: [core_lib, linux_identity_lib, linux_peer_credentials_lib, linux_pam_session_lib],
   install: false,
 )
 
