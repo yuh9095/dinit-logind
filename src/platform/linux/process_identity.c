@@ -164,11 +164,20 @@ dl_result dl_linux_process_uid_read(uint32_t pid, uint32_t *uid)
     for (line = strtok_r(buffer, "\n", &saveptr); line;
          line = strtok_r(NULL, "\n", &saveptr)) {
         if (strncmp(line, "Uid:", 4) == 0) {
-            unsigned long effective_uid;
-            if (sscanf(line + 4, "%*lu %lu %*u %*u",
-                       &effective_uid) != 1 ||
-                effective_uid > UINT32_MAX)
-                goto out;
+            const char *cursor = line + 4;
+            char *end = NULL;
+            unsigned long effective_uid = 0;
+            unsigned int field;
+            for (field = 0; field < 2; ++field) {
+                unsigned long value;
+                while (*cursor == ' ' || *cursor == '\\t') ++cursor;
+                errno = 0;
+                value = strtoul(cursor, &end, 10);
+                if (errno != 0 || end == cursor) goto out;
+                if (field == 1) effective_uid = value;
+                cursor = end;
+            }
+            if (effective_uid > UINT32_MAX) goto out;
             if (!read_start_time_at(process_fd, &after) || before != after)
                 goto out;
             *uid = (uint32_t)effective_uid;
