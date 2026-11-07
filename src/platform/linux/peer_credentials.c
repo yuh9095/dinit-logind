@@ -7,7 +7,6 @@
 #include "process_identity.h"
 
 #include <errno.h>
-#include <limits.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -30,9 +29,7 @@ dl_result dl_linux_peer_credentials_read(
                 errno == ENOPROTOOPT || errno == EOPNOTSUPP)
                    ? DL_ERR_INVALID : DL_ERR_STATE;
     }
-    if (peer_length != (socklen_t)sizeof(peer) || peer.pid <= 0 ||
-        (uintmax_t)peer.uid > UINT32_MAX ||
-        (uintmax_t)peer.gid > UINT32_MAX) {
+    if (peer_length != (socklen_t)sizeof(peer) || peer.pid <= 0) {
         return DL_ERR_STATE;
     }
 
@@ -42,6 +39,7 @@ dl_result dl_linux_peer_credentials_read(
     if (status != DL_OK) return status;
     if (result.process.pid != (uint32_t)peer.pid) return DL_ERR_STATE;
 
+    /* Linux uid_t and gid_t are 32-bit credential fields. */
     result.uid = (uint32_t)peer.uid;
     result.gid = (uint32_t)peer.gid;
     *credentials = result;
