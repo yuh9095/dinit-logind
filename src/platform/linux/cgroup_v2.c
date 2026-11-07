@@ -72,12 +72,12 @@ int dl_linux_cgroup_v2_parse_self_cgroup(const char *contents,
         first = memchr(line, ':', line_length);
         second = first == NULL ? NULL :
                  memchr(first + 1, ':', (size_t)(end - first - 1));
-        if (first == NULL || second == NULL) return -EINVAL;
+        if (first == NULL || second == NULL) { path[0] = '\0'; return -EINVAL; }
         if (first - line == 1 && line[0] == '0' && second == first + 1) {
-            if (found) return -EINVAL;
+            if (found) { path[0] = '\0'; return -EINVAL; }
             entry_path = second + 1;
             length = (size_t)(end - entry_path);
-            if (length == 0 || length >= path_size) return -ENAMETOOLONG;
+            if (length == 0 || length >= path_size) { path[0] = '\0'; return -ENAMETOOLONG; }
             memcpy(path, entry_path, length);
             path[length] = '\0';
             if (!valid_cgroup_path(path)) {
