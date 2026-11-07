@@ -433,6 +433,18 @@ int main(void)
     if (pump_until(client, &unlock_signal_count, 1) < 0 || unlock_signal_count != 1)
         goto stop_server;
 
+    /* Terminate must never degrade to signaling only the Leader.
+     * This synthetic session has no daemon-owned cgroup, so fail closed. */
+    stage = 169;
+    r = sd_bus_call_method(client, LOGIN1_NAME, object_path, SESSION_IFACE,
+                           "Terminate", &error, &reply, "");
+    if (r >= 0 || !sd_bus_error_has_name(&error,
+            "org.freedesktop.DBus.Error.NotSupported"))
+        goto stop_server;
+    sd_bus_error_free(&error);
+    sd_bus_message_unref(reply);
+    reply = NULL;
+
     stage = 17;
     r = sd_bus_call_method(client, LOGIN1_NAME, object_path, SESSION_IFACE,
                            "Kill", &error, &reply, "si", "all", SIGTERM);

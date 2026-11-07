@@ -109,20 +109,13 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
         if (dl_session_activate(ctx->manager, dl_session_id(session)) != DL_OK)
             r = -EIO;
         break;
-    case SESSION_OP_TERMINATE: {
-        dl_process_identity leader = dl_session_leader(session);
-        r = dl_linux_process_signal(&leader, SIGTERM);
-        break;
-    }
-    case SESSION_OP_KILL_LEADER: {
-        dl_process_identity leader = dl_session_leader(session);
-        r = dl_linux_process_signal(&leader, pending->signal_number);
-        break;
-    }
+    case SESSION_OP_TERMINATE:
     case SESSION_OP_KILL_ALL: {
         dl_linux_cgroup_v2 parent = {-1, {0}};
         dl_linux_cgroup_v2_session cgroup_session = {-1, -1, {0}};
         dl_process_identity leader = dl_session_leader(session);
+        int signo = pending->operation == SESSION_OP_TERMINATE ?
+                    SIGTERM : pending->signal_number;
         r = dl_linux_cgroup_v2_open_current(&parent);
         if (r < 0) {
             r = -ENOTSUP;
@@ -131,10 +124,9 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
         r = dl_linux_cgroup_v2_session_open(
             &parent, pending->session_id, &leader, &cgroup_session);
         if (r == 0) {
-            r = pending->signal_number == SIGKILL ?
+            r = signo == SIGKILL ?
                 dl_linux_cgroup_v2_session_kill_all(&cgroup_session) :
-                dl_linux_cgroup_v2_session_signal_all(
-                    &cgroup_session, pending->signal_number);
+                dl_linux_cgroup_v2_session_signal_all(&cgroup_session, signo);
             if (r == 0 &&
                 dl_linux_cgroup_v2_session_close(&cgroup_session) != 0)
                 dl_linux_cgroup_v2_session_release(&cgroup_session);
@@ -147,6 +139,12 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
             r = -ENOTSUP;
         break;
     }
+    case SESSION_OP_KILL_LEADER: {
+        dl_process_identity leader = dl_session_leader(session);
+        r = dl_linux_process_signal(&leader, pending->signal_number);
+        break;
+    }
+
     case SESSION_OP_LOCK:
     case SESSION_OP_UNLOCK:
         member = pending->operation == SESSION_OP_LOCK ? "Lock" : "Unlock";
