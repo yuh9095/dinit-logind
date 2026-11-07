@@ -516,6 +516,22 @@ int main(void)
     pthread_mutex_unlock(&server.lock);
     if (r != DL_OK) goto stop_server;
 
+    /* A vanished authority must fail closed rather than falling back to
+     * session-owner or root checks. */
+    atomic_store(&authority.stop, true);
+    pthread_join(authority_thread, NULL);
+    authority_started = 0;
+    (void)sd_bus_release_name(authority.bus, "org.freedesktop.PolicyKit1");
+    stage = 19;
+    r = sd_bus_call_method(client, LOGIN1_NAME, object_path, SESSION_IFACE,
+                           "Lock", &error, &reply, "");
+    if (r >= 0 || !sd_bus_error_has_name(&error,
+            "org.freedesktop.DBus.Error.AccessDenied"))
+        goto stop_server;
+    sd_bus_error_free(&error);
+    sd_bus_message_unref(reply);
+    reply = NULL;
+
     stage = 20;
     pthread_mutex_lock(&server.lock);
     r = dl_session_close(manager, dl_session_id(session));
