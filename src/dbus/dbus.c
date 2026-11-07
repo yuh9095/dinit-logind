@@ -760,7 +760,7 @@ static int method_session_lock(sd_bus_message *m, void *userdata,
     operation = strcmp(member, "Unlock") == 0 ?
                 SESSION_OP_UNLOCK : SESSION_OP_LOCK;
     return authorize_session_async(m, userdata,
-        "org.freedesktop.login1.lock-sessions", operation, error);
+        "org.freedesktop.login1.lock-sessions", operation, 0, error);
 }
 
 static const sd_bus_vtable session_vtable[] = {
