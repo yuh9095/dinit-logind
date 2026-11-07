@@ -39,6 +39,9 @@ struct dbus_context {
     struct pending_authorization *pending;
 };
 
+static int session_from_message(sd_bus_message *m, struct dbus_context *ctx,
+                                dl_session **ret_session);
+
 static void pending_authorization_remove(struct pending_authorization *pending)
 {
     struct pending_authorization **link;
