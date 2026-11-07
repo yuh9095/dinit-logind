@@ -229,6 +229,18 @@ int dl_dbus_open(dl_dbus *dbus, dl_manager *manager)
     return 0;
 }
 
+int dl_dbus_get_fd(const dl_dbus *dbus)
+{
+    if (!dbus || !dbus->bus) return -EINVAL;
+    return sd_bus_get_fd(dbus->bus);
+}
+
+int dl_dbus_get_events(const dl_dbus *dbus)
+{
+    if (!dbus || !dbus->bus) return -EINVAL;
+    return sd_bus_get_events(dbus->bus);
+}
+
 int dl_dbus_process(dl_dbus *dbus)
 {
     int r;

@@ -14,6 +14,8 @@ typedef struct {
 } dl_dbus;
 int dl_dbus_open(dl_dbus *dbus, dl_manager *manager);
 int dl_dbus_process(dl_dbus *dbus);
+int dl_dbus_get_fd(const dl_dbus *dbus);
+int dl_dbus_get_events(const dl_dbus *dbus);
 void dl_dbus_close(dl_dbus *dbus);
 #ifdef __cplusplus
 }

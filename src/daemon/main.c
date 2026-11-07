@@ -117,7 +117,7 @@ static int run_event_loop(dl_manager *manager, dl_dbus *dbus, int listener,
                           uint32_t allowed_peer_uid)
 {
     struct client *clients = NULL;
-    struct pollfd descriptor;
+    struct pollfd descriptors[2];
     int exit_status = 0;
 
     while (!stopping) {
@@ -125,20 +125,28 @@ static int run_event_loop(dl_manager *manager, dl_dbus *dbus, int listener,
         if (dl_dbus_process(dbus) < 0) { exit_status = 1; break; }
         struct client *client, *next;
 
-        descriptor.fd = listener;
-        descriptor.events = client_count(clients) < DL_MAX_CLIENTS ? POLLIN : 0;
-        descriptor.revents = 0;
+        descriptors[0].fd = listener;
+        descriptors[0].events = client_count(clients) < DL_MAX_CLIENTS ? POLLIN : 0;
+        descriptors[0].revents = 0;
+        descriptors[1].fd = dl_dbus_get_fd(dbus);
+        descriptors[1].events = (short)dl_dbus_get_events(dbus);
+        descriptors[1].revents = 0;
+        if (descriptors[1].fd < 0 || descriptors[1].events < 0) {
+            exit_status = 1;
+            break;
+        }
         do {
-            ready = poll(&descriptor, 1, DL_POLL_INTERVAL_MS);
+            ready = poll(descriptors, 2, DL_POLL_INTERVAL_MS);
         } while (ready < 0 && errno == EINTR && !stopping);
         if (ready < 0 && errno == EINTR && stopping) break;
         if (ready < 0) { exit_status = 1; break; }
 
-        if ((descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+        if ((descriptors[0].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0 ||
+            (descriptors[1].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
             exit_status = 1;
             break;
         }
-        if ((descriptor.revents & POLLIN) != 0 &&
+        if ((descriptors[0].revents & POLLIN) != 0 &&
             client_count(clients) < DL_MAX_CLIENTS) {
             struct client *entry = calloc(1, sizeof(*entry));
             if (entry == NULL) { exit_status = 1; break; }
