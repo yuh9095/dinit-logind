@@ -50,9 +50,13 @@ void dl_linux_cgroup_v2_session_release(dl_linux_cgroup_v2_session *session);
 /* Reap empty cgroups previously created by this daemon instance. */
 void dl_linux_cgroup_v2_registry_reap(void);
 
-/* Send a non-SIGKILL signal to processes currently verified in this
- * daemon-owned session cgroup. Requires pidfd_open/pidfd_send_signal; no
- * numeric-PID kill(2) fallback is permitted. */
+/* Best-effort non-SIGKILL signaling of processes observed in this
+ * daemon-owned session cgroup subtree. pidfds prevent PID-reuse redirection;
+ * membership is rechecked immediately before signaling, but cgroup migration
+ * can still race between that check and pidfd_send_signal(). This operation
+ * is not an atomic whole-session operation. Requires pidfd support and never
+ * falls back to numeric-PID kill(2). Use session_kill_all() for atomic,
+ * migration-safe SIGKILL semantics when cgroup.kill is available. */
 int dl_linux_cgroup_v2_session_signal_all(
     const dl_linux_cgroup_v2_session *session, int signal_number);
 
