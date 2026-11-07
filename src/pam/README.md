@@ -1,18 +1,17 @@
 # PAM ingress
 
-The PAM ingress adapter is being developed in layers.
+The optional `pam_dinit_logind.so` module is built when the PAM development
+dependency is available. It implements `pam_sm_open_session` and
+`pam_sm_close_session`.
 
-- The Linux PAM-session lifetime helper binds a connected Unix stream socket
-  to one core Session.
-- The leader PID/UID/GID and process identity tuple are acquired from kernel
-  peer credentials and procfs; caller-supplied leader identity is ignored.
-- The login UID and session metadata are supplied by the trusted PAM ingress.
-  They are not inferred from the socket peer because privileged PAM stacks
-  can create sessions for a different account.
-- The daemon event loop must monitor the retained socket and call the
-  non-blocking disconnect check. Disconnect closes the associated core
-  Session. Explicit close and disconnect are idempotent.
+On open, it resolves PAM_USER through NSS, sends a bounded versioned request
+to the configured daemon Unix socket, and retains the connection in PAM
+handle data. On close or PAM handle cleanup, it closes the connection so the
+daemon can release the associated session.
 
-This is not yet a loadable PAM module or a complete daemon socket protocol.
-PAM handle data storage, PAM_USER/NSS resolution, module configuration,
-authentication policy, and end-to-end integration tests remain future work.
+The daemon must authenticate the socket peer independently and validate the
+requested login UID; peer UID and login UID are intentionally not assumed to
+match. The daemon-side protocol acceptor is not implemented yet, so this
+module is not deployable until that component and end-to-end tests exist.
+
+See `docs/pam-protocol-v1.md`.
