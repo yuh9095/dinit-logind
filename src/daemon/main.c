@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #include "config.h"
 #include "runtime_socket.h"
+#include "../dbus/dbus.h"
 #include "../platform/linux/pam_ingress.h"
 
 #include <errno.h>
@@ -112,7 +113,7 @@ static bool pending_timed_out(const struct client *client)
            DL_PENDING_TIMEOUT_SECONDS;
 }
 
-static int run_event_loop(dl_manager *manager, int listener,
+static int run_event_loop(dl_manager *manager, dl_dbus *dbus, int listener,
                           uint32_t allowed_peer_uid)
 {
     struct client *clients = NULL;
@@ -121,6 +122,7 @@ static int run_event_loop(dl_manager *manager, int listener,
 
     while (!stopping) {
         int ready;
+        if (dl_dbus_process(dbus) < 0) { exit_status = 1; break; }
         struct client *client, *next;
 
         descriptor.fd = listener;
@@ -189,6 +191,7 @@ int main(int argc, char **argv)
     const char *config_path;
     dl_daemon_config config;
     dl_runtime_socket runtime;
+    dl_dbus dbus;
     dl_manager *manager;
     int args, result;
 
@@ -218,9 +221,16 @@ int main(int argc, char **argv)
         dl_runtime_socket_close(&runtime);
         return 1;
     }
+    if (dl_dbus_open(&dbus, manager) < 0) {
+        (void)fprintf(stderr, "dinit-logind: cannot connect to system D-Bus or own org.freedesktop.login1\n");
+        dl_manager_destroy(manager);
+        dl_runtime_socket_close(&runtime);
+        return 1;
+    }
     if (install_signal_handlers() != 0) {
         (void)fprintf(stderr, "dinit-logind: cannot install signal handlers: %s\n",
                       strerror(errno));
+        dl_dbus_close(&dbus);
         dl_manager_destroy(manager);
         dl_runtime_socket_close(&runtime);
         return 1;
@@ -228,8 +238,9 @@ int main(int argc, char **argv)
 
     (void)fprintf(stderr, "dinit-logind: listening on %s/pam.sock\n",
                   "/run/dinit-logind");
-    result = run_event_loop(manager, runtime.fd, config.allowed_peer_uid);
+    result = run_event_loop(manager, &dbus, runtime.fd, config.allowed_peer_uid);
 
+    dl_dbus_close(&dbus);
     dl_manager_destroy(manager);
     dl_runtime_socket_close(&runtime);
     return result;
