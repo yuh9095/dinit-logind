@@ -170,7 +170,7 @@ dl_result dl_linux_process_uid_read(uint32_t pid, uint32_t *uid)
             unsigned int field;
             for (field = 0; field < 2; ++field) {
                 unsigned long value;
-                while (*cursor == ' ' || *cursor == '\\t') ++cursor;
+                while (*cursor == ' ' || *cursor == '\t') ++cursor;
                 errno = 0;
                 value = strtoul(cursor, &end, 10);
                 if (errno != 0 || end == cursor) goto out;
