@@ -1,6 +1,6 @@
 # Core and session model
 
-Status: initial implementation contract.
+Status: initial implementation contract; the first core implementation and Linux process identity reader are now present.
 
 ## Ownership
 
@@ -12,21 +12,19 @@ A User is keyed by the numeric UID. A User may exist before its first session (f
 
 A session has a daemon-generated stable ID and an authenticated UID. Its leader identity is a tuple:
 
-- PID as validated by the Linux ingress adapter;
-- PID namespace inode;
-- process start time from procfs (clock ticks since boot).
+- PID obtained from authenticated peer credentials;
+- PID namespace inode from /proc/PID/ns/pid;
+- process start time (clock ticks since boot) from field 22 of /proc/PID/stat.
 
-PID alone is never an identity. The tuple prevents accidental matching across PID namespaces and PID reuse. The Linux adapter must obtain peer credentials from the transport and validate the process identity; the core does not trust caller-provided textual PIDs and does not itself perform procfs I/O.
+PID alone is never an identity. The tuple prevents accidental matching across PID namespaces and PID reuse. The Linux reader opens the process directory once, reads the start time twice, and rejects inconsistent or inaccessible procfs state. The PAM/socket ingress must still bind the PID to authenticated peer credentials and obtain the UID independently; procfs identity acquisition is not authentication or authorization.
 
-The tuple is intentionally not an exposed stable ABI. A future pidfd integration may strengthen liveness checks, but must retain a portable fallback for kernels/libcs without pidfd support.
+The tuple is intentionally not an exposed stable ABI. A future pidfd integration may strengthen liveness checks, but must retain a fallback for kernels/libcs without pidfd support. A zero process start-time value is not rejected by the core because it can be a valid kernel value on very early systems.
 
 ## Metadata
 
 Session metadata includes seat, VT number, TTY, display, service, session type, session class, remote flag, and remote user/host labels. Metadata is copied into manager-owned bounded storage at creation. Optional fields may be empty. The core validates lengths and rejects control characters; semantic checks such as whether a seat or VT exists belong to the corresponding adapter/policy module.
 
 ## Lifecycle
-
-Initial state machine:
 
 ```text
           activate
@@ -69,6 +67,6 @@ Users are keyed by UID. Linger is a persistent boolean in manager memory in this
 - runtime directory creation;
 - NSS/userdb records beyond UID identity;
 - seat/VT/device state;
-- process monitoring and pidfd ownership;
+- pidfd ownership and process-exit monitoring;
 - persistent linger storage;
 - multi-threaded access and event-loop integration.

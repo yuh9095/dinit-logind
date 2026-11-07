@@ -89,8 +89,7 @@ static bool copy_text(char destination[DL_METADATA_MAX], const char *source)
 static bool valid_identity(const dl_process_identity *identity)
 {
     return identity != NULL && identity->pid != 0 &&
-           identity->pid_namespace_inode != 0 &&
-           identity->process_start_time != 0;
+           identity->pid_namespace_inode != 0;
 }
 
 static bool same_identity(const dl_process_identity *a,

@@ -13,4 +13,11 @@ core_lib = static_library(
   install: false,
 )
 
+linux_identity_lib = static_library(
+  'dinit-logind-linux-identity',
+  'src/platform/linux/process_identity.c',
+  include_directories: include_directories('src/core', 'src/platform/linux'),
+  install: false,
+)
+
 subdir('tests/unit')
