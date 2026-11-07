@@ -6,11 +6,33 @@
 #include "pam_protocol.h"
 
 #include <assert.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
+
+static int make_connection(int *client_fd)
+{
+    static const char name[] = "dinit-logind-test";
+    struct sockaddr_un address;
+    socklen_t length;
+    int listener;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    memcpy(address.sun_path + 1, name, sizeof(name) - 1);
+    length = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + sizeof(name) - 1);
+    listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    assert(listener >= 0);
+    assert(bind(listener, (struct sockaddr *)&address, length) == 0);
+    assert(listen(listener, 4) == 0);
+    *client_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    assert(*client_fd >= 0);
+    assert(connect(*client_fd, (struct sockaddr *)&address, length) == 0);
+    return listener;
+}
 
 static void fill_request(dl_pam_open_request *r)
 {
@@ -24,98 +46,91 @@ static void fill_request(dl_pam_open_request *r)
     memcpy(r->session_class, "user", 5);
 }
 
-static int make_listener(int peer[2])
-{
-    int listener[2];
-    assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, listener) == 0);
-    peer[0] = listener[0];
-    peer[1] = listener[1];
-    return listener[0];
-}
-
 static void test_valid_lifecycle(void)
 {
-    int pair[2], accepted_pair[2];
+    int listener, client;
     dl_manager *manager = dl_manager_new();
     dl_pam_ingress *ingress = NULL;
     dl_pam_open_request request;
+    dl_pam_open_response response;
     bool complete = false, closed = false;
     const dl_user *user;
-    char id[DL_SESSION_ID_MAX];
 
     assert(manager != NULL);
-    assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) == 0);
-    assert(dl_pam_ingress_accept(manager, pair[0], (uint32_t)getuid(),
+    listener = make_connection(&client);
+    assert(dl_pam_ingress_accept(manager, listener, (uint32_t)getuid(),
                                  &ingress) == DL_OK);
     fill_request(&request);
-    assert(write(pair[1], &request, sizeof(request)) == (ssize_t)sizeof(request));
+    assert(write(client, &request, sizeof(request)) == (ssize_t)sizeof(request));
     assert(dl_pam_ingress_step(ingress, &complete) == DL_OK && complete);
     assert(dl_pam_ingress_session_id(ingress) != NULL);
-    (void)snprintf(id, sizeof(id), "%s", dl_pam_ingress_session_id(ingress));
+    assert(recv(client, &response, sizeof(response), MSG_WAITALL) ==
+           (ssize_t)sizeof(response));
+    assert(response.magic == DL_PAM_RESPONSE_MAGIC);
+    assert(response.status == 0 && response.session_id[0] != '\0');
     user = dl_user_find(manager, request.uid);
     assert(user != NULL && dl_user_active_session_count(user) == 1);
-    (void)close(pair[1]);
+    (void)close(client);
     assert(dl_pam_ingress_peer_closed(ingress, &closed) == DL_OK && closed);
     assert(dl_user_active_session_count(user) == 0);
     dl_pam_ingress_destroy(ingress);
-    (void)close(pair[0]);
+    (void)close(listener);
     dl_manager_destroy(manager);
-    (void)accepted_pair;
 }
 
 static void test_bad_request(void)
 {
-    int pair[2];
+    int listener, client;
     dl_manager *manager = dl_manager_new();
     dl_pam_ingress *ingress = NULL;
     dl_pam_open_request request;
     bool complete = false;
     assert(manager != NULL);
-    assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) == 0);
-    assert(dl_pam_ingress_accept(manager, pair[0], (uint32_t)getuid(),
+    listener = make_connection(&client);
+    assert(dl_pam_ingress_accept(manager, listener, (uint32_t)getuid(),
                                  &ingress) == DL_OK);
     fill_request(&request);
     request.magic = 0;
-    assert(write(pair[1], &request, sizeof(request)) == (ssize_t)sizeof(request));
+    assert(write(client, &request, sizeof(request)) == (ssize_t)sizeof(request));
     assert(dl_pam_ingress_step(ingress, &complete) == DL_ERR_INVALID);
     assert(!complete);
     dl_pam_ingress_destroy(ingress);
-    (void)close(pair[0]); (void)close(pair[1]);
+    (void)close(listener); (void)close(client);
     dl_manager_destroy(manager);
 }
 
 static void test_peer_uid_policy(void)
 {
-    int pair[2];
+    int listener, client;
     dl_manager *manager = dl_manager_new();
     dl_pam_ingress *ingress = NULL;
     assert(manager != NULL);
-    assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) == 0);
-    assert(dl_pam_ingress_accept(manager, pair[0], (uint32_t)getuid() + 1,
+    listener = make_connection(&client);
+    assert(dl_pam_ingress_accept(manager, listener, (uint32_t)getuid() + 1,
                                  &ingress) == DL_ERR_INVALID);
     assert(ingress == NULL);
-    (void)close(pair[0]); (void)close(pair[1]);
+    (void)close(listener); (void)close(client);
     dl_manager_destroy(manager);
 }
 
 static void test_truncated_request(void)
 {
-    int pair[2];
+    int listener, client;
     dl_manager *manager = dl_manager_new();
     dl_pam_ingress *ingress = NULL;
     dl_pam_open_request request;
     bool complete = false;
     assert(manager != NULL);
-    assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) == 0);
-    assert(dl_pam_ingress_accept(manager, pair[0], (uint32_t)getuid(),
+    listener = make_connection(&client);
+    assert(dl_pam_ingress_accept(manager, listener, (uint32_t)getuid(),
                                  &ingress) == DL_OK);
     fill_request(&request);
-    assert(write(pair[1], &request, sizeof(request) / 2) ==
+    assert(write(client, &request, sizeof(request) / 2) ==
            (ssize_t)(sizeof(request) / 2));
-    (void)shutdown(pair[1], SHUT_WR);
+    (void)shutdown(client, SHUT_WR);
     assert(dl_pam_ingress_step(ingress, &complete) == DL_ERR_INVALID);
     dl_pam_ingress_destroy(ingress);
-    (void)close(pair[0]); (void)close(pair[1]);
+    (void)close(listener); (void)close(client);
     dl_manager_destroy(manager);
 }
 

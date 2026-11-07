@@ -21,7 +21,9 @@ struct dl_pam_ingress {
     int fd;
     uint32_t allowed_peer_uid;
     size_t received;
+    size_t response_sent;
     dl_pam_open_request request;
+    dl_pam_open_response response;
     dl_pam_session *session;
 };
 
@@ -76,8 +78,7 @@ dl_result dl_pam_ingress_accept(dl_manager *manager, int listen_fd,
     if (manager == NULL || listen_fd < 0 || out_ingress == NULL)
         return DL_ERR_INVALID;
     fd = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
-    if (fd < 0) return (errno == EAGAIN || errno == EWOULDBLOCK ||
-                        errno == EINTR) ? DL_ERR_STATE : DL_ERR_STATE;
+    if (fd < 0) return DL_ERR_STATE;
     result = dl_linux_peer_credentials_read(fd, &peer);
     if (result != DL_OK || peer.uid != allowed_peer_uid) {
         (void)close(fd);
@@ -92,6 +93,25 @@ dl_result dl_pam_ingress_accept(dl_manager *manager, int listen_fd,
     return DL_OK;
 }
 
+static dl_result flush_response(dl_pam_ingress *ingress, bool *complete)
+{
+    ssize_t n;
+    while (ingress->response_sent < sizeof(ingress->response)) {
+        n = send(ingress->fd,
+                 (const char *)&ingress->response + ingress->response_sent,
+                 sizeof(ingress->response) - ingress->response_sent,
+                 MSG_NOSIGNAL);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return DL_OK;
+        if (n <= 0) return DL_ERR_STATE;
+        ingress->response_sent += (size_t)n;
+    }
+    (void)close(ingress->fd);
+    ingress->fd = -1;
+    *complete = true;
+    return DL_OK;
+}
+
 dl_result dl_pam_ingress_step(dl_pam_ingress *ingress, bool *complete)
 {
     dl_result result;
@@ -99,9 +119,9 @@ dl_result dl_pam_ingress_step(dl_pam_ingress *ingress, bool *complete)
     ssize_t n;
 
     if (complete != NULL) *complete = false;
-    if (ingress == NULL || complete == NULL || ingress->fd < 0)
-        return DL_ERR_INVALID;
-    if (ingress->session != NULL) { *complete = true; return DL_OK; }
+    if (ingress == NULL || complete == NULL) return DL_ERR_INVALID;
+    if (ingress->session != NULL) return flush_response(ingress, complete);
+    if (ingress->fd < 0) return DL_ERR_STATE;
 
     while (ingress->received < sizeof(ingress->request)) {
         n = recv(ingress->fd, (char *)&ingress->request + ingress->received,
@@ -131,10 +151,15 @@ dl_result dl_pam_ingress_step(dl_pam_ingress *ingress, bool *complete)
     result = dl_pam_session_begin(ingress->manager, ingress->fd, &spec,
                                   &ingress->session);
     if (result != DL_OK) return result;
-    (void)close(ingress->fd);
-    ingress->fd = -1;
-    *complete = true;
-    return DL_OK;
+
+    memset(&ingress->response, 0, sizeof(ingress->response));
+    ingress->response.magic = DL_PAM_RESPONSE_MAGIC;
+    ingress->response.version = DL_PAM_PROTOCOL_VERSION;
+    ingress->response.size = (uint16_t)sizeof(ingress->response);
+    (void)snprintf(ingress->response.session_id,
+                   sizeof(ingress->response.session_id), "%s",
+                   dl_pam_session_id(ingress->session));
+    return flush_response(ingress, complete);
 }
 
 dl_result dl_pam_ingress_peer_closed(dl_pam_ingress *ingress, bool *closed)

@@ -82,6 +82,24 @@ static int connect_daemon(void)
     return fd;
 }
 
+static int read_response(int fd, dl_pam_open_response *response)
+{
+    size_t received = 0;
+    while (received < sizeof(*response)) {
+        ssize_t n = recv(fd, (char *)response + received,
+                         sizeof(*response) - received, 0);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return -1;
+        received += (size_t)n;
+    }
+    if (response->magic != DL_PAM_RESPONSE_MAGIC ||
+        response->version != DL_PAM_PROTOCOL_VERSION ||
+        response->size != sizeof(*response) || response->status != 0 ||
+        memchr(response->session_id, '\0', sizeof(response->session_id)) == NULL)
+        return -1;
+    return 0;
+}
+
 PAM_EXTERN int pam_sm_open_session(pam_handle_t *pamh, int flags,
                                    int argc, const char **argv)
 {
@@ -90,6 +108,7 @@ PAM_EXTERN int pam_sm_open_session(pam_handle_t *pamh, int flags,
     const char *type = NULL, *session_class = NULL;
     struct pam_session_data *session;
     dl_pam_open_request request;
+    dl_pam_open_response response;
     uint32_t uid;
     int fd, status;
     size_t sent = 0;
@@ -133,6 +152,10 @@ PAM_EXTERN int pam_sm_open_session(pam_handle_t *pamh, int flags,
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) { (void)close(fd); return PAM_SESSION_ERR; }
         sent += (size_t)n;
+    }
+    if (read_response(fd, &response) != 0) {
+        (void)close(fd);
+        return PAM_SESSION_ERR;
     }
 
     session = calloc(1, sizeof(*session));

@@ -1,13 +1,12 @@
 # daemon module
 
 The daemon entry point owns startup/shutdown ordering, signals, configuration,
-and the event loop. The PAM ingress adapter is now available as a Linux
-platform component: accept connections from a protected AF_UNIX listener,
-call `dl_pam_ingress_step()` on readable pending clients, and monitor
-completed clients for disconnect. All Core and ingress calls must run on the
-manager owner thread.
+and the event loop. The Linux PAM ingress accepts connections from a protected
+AF_UNIX listener, authenticates SO_PEERCRED, parses requests incrementally,
+and returns a success acknowledgement only after creating a Core Session.
+The event loop calls `dl_pam_ingress_step()` on readable pending clients and
+monitors completed clients for disconnect. All calls run on the manager owner
+thread.
 
-The daemon must create the listener beneath a root-owned, non-writable
-runtime directory and configure the allowed peer UID as root for the normal
-system PAM deployment. Do not expose a caller-controlled peer-UID setting
-through an untrusted config source.
+The listener must live beneath a root-owned, non-writable runtime directory
+and the allowed peer UID should be root for normal system PAM deployment.
