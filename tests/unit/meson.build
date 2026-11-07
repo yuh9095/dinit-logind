@@ -27,3 +27,13 @@ peer_credentials_test = executable(
 )
 
 test('Linux Unix socket peer credentials', peer_credentials_test)
+
+pam_session_test = executable(
+  'test-pam-session',
+  'test_pam_session.c',
+  include_directories: include_directories('../../src/core', '../../src/platform/linux'),
+  link_with: [core_lib, linux_identity_lib, linux_peer_credentials_lib, linux_pam_session_lib],
+  install: false,
+)
+
+test('PAM session socket lifetime', pam_session_test)
