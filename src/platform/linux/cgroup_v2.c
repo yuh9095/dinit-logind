@@ -148,7 +148,7 @@ int dl_linux_cgroup_v2_open_current(dl_linux_cgroup_v2 *cgroup)
 
     root_fd = open(DL_CGROUP_MOUNT,
                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (root_fd < 0) return -errno;
+    if (root_fd < 0) { result = -errno; goto out; }
     result = verify_cgroup2_fd(root_fd);
     if (result != 0) goto out;
 
