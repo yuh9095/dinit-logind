@@ -13,13 +13,13 @@ extern "C" {
 
 typedef struct {
     int fd;
+    char path[4096];
 } dl_linux_cgroup_v2;
 
 typedef struct {
     int parent_fd;
     int fd;
     char name[96];
-    char path[4096];
 } dl_linux_cgroup_v2_session;
 
 /* Parse the unified 0:: entry from /proc/self/cgroup. Root and unsafe paths
