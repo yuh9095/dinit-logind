@@ -82,13 +82,12 @@ static int method_get_user(sd_bus_message *m, void *userdata,
 {
     struct dbus_context *ctx = userdata;
     uint32_t uid;
-    char id[32], path[256];
+    char path[256];
     if (sd_bus_message_read(m, "u", &uid) < 0) return -EINVAL;
     if (!dl_user_find(ctx->manager, uid))
         return sd_bus_error_setf(ret_error,
             "org.freedesktop.login1.NoSuchUser", "No user with UID %u", uid);
-    (void)snprintf(id, sizeof(id), "%u", (unsigned int)uid);
-    if (make_object_path("user", id, path, sizeof(path)) < 0)
+    if (path_for_user(uid, path, sizeof(path)) < 0)
         return sd_bus_error_set_const(ret_error,
             "org.freedesktop.DBus.Error.InvalidArgs", "Invalid user identifier");
     return sd_bus_reply_method_return(m, "o", path);
@@ -152,10 +151,9 @@ static int method_list_users(sd_bus_message *m, void *userdata,
     for (i = 0; r >= 0 && i < dl_manager_user_count(ctx->manager); ++i) {
         const dl_user *user = dl_manager_user_at(ctx->manager, i);
         uint32_t uid = dl_user_uid(user);
-        char username[256], id[32], path[256];
-        (void)snprintf(id, sizeof(id), "%u", (unsigned int)uid);
+        char username[256], path[256];
         if (uid_to_name(uid, username, sizeof(username)) < 0 ||
-            make_object_path("user", id, path, sizeof(path)) < 0) {
+            path_for_user(uid, path, sizeof(path)) < 0) {
             r = -EINVAL;
             break;
         }
