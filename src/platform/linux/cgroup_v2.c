@@ -5,6 +5,7 @@
 #include "cgroup_v2.h"
 
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdbool.h>
@@ -444,13 +445,16 @@ int dl_linux_cgroup_v2_session_kill_all(
 
 
 #if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
-static int cgroup_v2_read_procs(const dl_linux_cgroup_v2_session *session,
-                               char *buffer, size_t capacity)
+#define DL_CGROUP_SIGNAL_MAX_DEPTH 64u
+#define DL_CGROUP_SIGNAL_MAX_PROCESSES 65536u
+
+static int cgroup_v2_read_procs_fd(int cgroup_fd, char *buffer,
+                                   size_t capacity)
 {
     int fd;
     size_t used = 0;
     if (capacity < 2) return -EINVAL;
-    fd = openat(session->fd, "cgroup.procs",
+    fd = openat(cgroup_fd, "cgroup.procs",
                 O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return -errno;
     while (used + 1 < capacity) {
@@ -472,14 +476,14 @@ static int cgroup_v2_read_procs(const dl_linux_cgroup_v2_session *session,
     return 0;
 }
 
-static int cgroup_v2_contains_pid(const dl_linux_cgroup_v2_session *session,
-                                  pid_t wanted, bool *contains)
+static int cgroup_v2_contains_pid_fd(int cgroup_fd, pid_t wanted,
+                                     bool *contains)
 {
     char buffer[65536];
     char *line, *saveptr = NULL;
     int r;
     *contains = false;
-    r = cgroup_v2_read_procs(session, buffer, sizeof(buffer));
+    r = cgroup_v2_read_procs_fd(cgroup_fd, buffer, sizeof(buffer));
     if (r < 0) return r;
     for (line = strtok_r(buffer, "\n", &saveptr); line;
          line = strtok_r(NULL, "\n", &saveptr)) {
@@ -497,67 +501,122 @@ static int cgroup_v2_contains_pid(const dl_linux_cgroup_v2_session *session,
     }
     return 0;
 }
+
+static int cgroup_v2_signal_one(int cgroup_fd, pid_t pid,
+                                int signal_number)
+{
+    int pidfd, r, saved_errno;
+    bool still_member = false;
+    dl_process_identity identity;
+
+    /* Pin the PID before reading process metadata. A reused PID can never
+     * redirect pidfd_send_signal to a different task after this point. */
+    pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
+    if (pidfd < 0) {
+        if (errno == ESRCH) return 0;
+        return errno == ENOSYS ? -ENOTSUP : -errno;
+    }
+    if (dl_linux_process_identity_read((uint32_t)pid, &identity) != DL_OK) {
+        (void)close(pidfd);
+        return 0;
+    }
+    r = cgroup_v2_contains_pid_fd(cgroup_fd, pid, &still_member);
+    if (r < 0 || !still_member) {
+        (void)close(pidfd);
+        return r;
+    }
+    r = (int)syscall(SYS_pidfd_send_signal, pidfd, signal_number, NULL, 0);
+    saved_errno = errno;
+    (void)close(pidfd);
+    if (r < 0 && saved_errno != ESRCH)
+        return saved_errno == ENOSYS ? -ENOTSUP : -saved_errno;
+    return 0;
+}
+
+static int cgroup_v2_signal_tree(int cgroup_fd, int signal_number,
+                                 unsigned int depth, size_t *process_count)
+{
+    char buffer[65536];
+    char *line, *saveptr = NULL;
+    DIR *directory = NULL;
+    struct dirent *entry;
+    int duplicate_fd, r;
+
+    if (depth > DL_CGROUP_SIGNAL_MAX_DEPTH) return -ELOOP;
+    r = verify_cgroup2_fd(cgroup_fd);
+    if (r < 0) return r;
+
+    r = cgroup_v2_read_procs_fd(cgroup_fd, buffer, sizeof(buffer));
+    if (r < 0) return r;
+    for (line = strtok_r(buffer, "\n", &saveptr); line;
+         line = strtok_r(NULL, "\n", &saveptr)) {
+        char *end = NULL;
+        long value;
+        errno = 0;
+        value = strtol(line, &end, 10);
+        if (errno != 0 || end == line || *end != '\0' ||
+            value <= 0 || value > INT_MAX)
+            return -EIO;
+        if (++(*process_count) > DL_CGROUP_SIGNAL_MAX_PROCESSES)
+            return -E2BIG;
+        r = cgroup_v2_signal_one(cgroup_fd, (pid_t)value, signal_number);
+        if (r < 0) return r;
+    }
+
+    duplicate_fd = fcntl(cgroup_fd, F_DUPFD_CLOEXEC, 0);
+    if (duplicate_fd < 0) return -errno;
+    directory = fdopendir(duplicate_fd);
+    if (directory == NULL) {
+        r = -errno;
+        (void)close(duplicate_fd);
+        return r;
+    }
+    errno = 0;
+    while ((entry = readdir(directory)) != NULL) {
+        int child_fd;
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0)
+            continue;
+        child_fd = openat(cgroup_fd, entry->d_name,
+                          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (child_fd < 0) {
+            if (errno == ENOTDIR) continue;
+            r = -errno;
+            (void)closedir(directory);
+            return r;
+        }
+        r = cgroup_v2_signal_tree(child_fd, signal_number,
+                                  depth + 1, process_count);
+        (void)close(child_fd);
+        if (r < 0) {
+            (void)closedir(directory);
+            return r;
+        }
+        errno = 0;
+    }
+    if (errno != 0) r = -errno;
+    else r = 0;
+    (void)closedir(directory);
+    return r;
+}
 #endif
 
 int dl_linux_cgroup_v2_session_signal_all(
     const dl_linux_cgroup_v2_session *session, int signal_number)
 {
 #if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
-    char buffer[65536];
-    char *line, *saveptr = NULL;
-    int r;
+    size_t process_count = 0;
     if (session == NULL || session->fd < 0 || signal_number <= 0 ||
         signal_number == SIGKILL)
         return -EINVAL;
-    r = cgroup_v2_read_procs(session, buffer, sizeof(buffer));
-    if (r < 0) return r;
-    for (line = strtok_r(buffer, "\n", &saveptr); line;
-         line = strtok_r(NULL, "\n", &saveptr)) {
-        char *end = NULL;
-        long value;
-        int pidfd, saved_errno;
-        bool still_member = false;
-        dl_process_identity identity;
-        errno = 0;
-        value = strtol(line, &end, 10);
-        if (errno != 0 || end == line || *end != '\0' ||
-            value <= 0 || value > INT_MAX)
-            return -EIO;
-
-        /* Open the pidfd before inspecting /proc so a later PID reuse cannot
-         * redirect the signal to an unrelated process. */
-        pidfd = (int)syscall(SYS_pidfd_open, (pid_t)value, 0);
-        if (pidfd < 0) {
-            if (errno == ESRCH) continue;
-            return errno == ENOSYS ? -ENOTSUP : -errno;
-        }
-        if (dl_linux_process_identity_read((uint32_t)value, &identity) != DL_OK) {
-            (void)close(pidfd);
-            continue;
-        }
-        r = cgroup_v2_contains_pid(session, (pid_t)value, &still_member);
-        if (r < 0) {
-            (void)close(pidfd);
-            return r;
-        }
-        if (!still_member) {
-            (void)close(pidfd);
-            continue;
-        }
-        r = (int)syscall(SYS_pidfd_send_signal, pidfd, signal_number, NULL, 0);
-        saved_errno = errno;
-        (void)close(pidfd);
-        if (r < 0 && saved_errno != ESRCH)
-            return saved_errno == ENOSYS ? -ENOTSUP : -saved_errno;
-    }
-    return 0;
+    return cgroup_v2_signal_tree(session->fd, signal_number, 0,
+                                 &process_count);
 #else
     (void)session;
     (void)signal_number;
     return -ENOTSUP;
 #endif
 }
-
 
 
 void dl_linux_cgroup_v2_registry_reap(void)
