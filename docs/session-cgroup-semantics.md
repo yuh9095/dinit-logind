@@ -45,3 +45,10 @@ back to leader-only signaling, and keep its grace-period work asynchronous so
 the D-Bus event loop is not blocked. The eventual SIGKILL phase must use
 `cgroup.kill`. The initial non-fatal phase remains subject to the documented
 best-effort migration semantics above.
+
+
+## Asynchronous Terminate policy
+
+`Terminate()` first sends `SIGTERM` to the daemon-owned session cgroup using pidfds, then returns to the D-Bus event loop. A monotonic deadline is tracked independently of the core Session object so PAM teardown cannot invalidate an accepted termination. At the deadline, the daemon uses `cgroup.kill` for the whole subtree. The default deadline is 90 seconds, matching systemd v262.2's default system-manager `DefaultTimeoutStopSec` / `default-timeout-sec`; it is not a timeout hard-coded by logind's D-Bus method itself.
+
+The daemon checks that `cgroup.kill` is available before sending the initial signal. If the required primitive is unavailable, `Terminate()` fails closed. Pending terminations are also forced through `cgroup.kill` during daemon shutdown. Failed final kills are reported to stderr and retried while the event loop remains active.

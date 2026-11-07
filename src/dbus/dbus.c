@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define DL_LOGIN1_NAME "org.freedesktop.login1"
@@ -19,6 +20,10 @@
 
 #ifndef DL_POLKIT_AUTH_TIMEOUT_USEC
 #define DL_POLKIT_AUTH_TIMEOUT_USEC (30ULL * 1000ULL * 1000ULL)
+#ifndef DL_SESSION_TERMINATE_TIMEOUT_SEC
+/* systemd v262.2 default-timeout-sec is 90 seconds. */
+#define DL_SESSION_TERMINATE_TIMEOUT_SEC 90
+#endif
 #endif
 
 enum session_operation {
@@ -40,10 +45,19 @@ struct pending_authorization {
     struct pending_authorization *next;
 };
 
+struct pending_termination {
+    dl_linux_cgroup_v2_session cgroup;
+    struct timespec deadline;
+    char session_id[DL_SESSION_ID_MAX];
+    bool warned;
+    struct pending_termination *next;
+};
+
 struct dbus_context {
     dl_manager *manager;
     sd_bus *bus;
     struct pending_authorization *pending;
+    struct pending_termination *terminations;
 };
 
 static int session_from_message(sd_bus_message *m, struct dbus_context *ctx,
@@ -109,13 +123,64 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
         if (dl_session_activate(ctx->manager, dl_session_id(session)) != DL_OK)
             r = -EIO;
         break;
-    case SESSION_OP_TERMINATE:
+    case SESSION_OP_TERMINATE: {
+        dl_linux_cgroup_v2 parent = {-1, {0}};
+        dl_linux_cgroup_v2_session cgroup_session = {-1, -1, {0}};
+        struct pending_termination *termination = NULL;
+        dl_process_identity leader = dl_session_leader(session);
+
+        if (pending_termination_find(ctx, pending->session_id)) {
+            r = 0;
+            break;
+        }
+        r = dl_linux_cgroup_v2_open_current(&parent);
+        if (r < 0) {
+            r = -ENOTSUP;
+            break;
+        }
+        r = dl_linux_cgroup_v2_session_open(
+            &parent, pending->session_id, &leader, &cgroup_session);
+        if (r == 0)
+            r = dl_linux_cgroup_v2_session_kill_all_available(&cgroup_session);
+        if (r == 0) {
+            termination = calloc(1, sizeof(*termination));
+            if (!termination) r = -ENOMEM;
+            else {
+                termination->cgroup.fd = -1;
+                termination->cgroup.parent_fd = -1;
+            }
+        }
+        if (r == 0 && clock_gettime(CLOCK_MONOTONIC,
+                                    &termination->deadline) != 0)
+            r = -errno;
+        if (r == 0) {
+            termination->deadline.tv_sec += DL_SESSION_TERMINATE_TIMEOUT_SEC;
+            (void)snprintf(termination->session_id,
+                           sizeof(termination->session_id), "%s",
+                           pending->session_id);
+            r = dl_linux_cgroup_v2_session_signal_all(&cgroup_session, SIGTERM);
+        }
+        if (r == 0) {
+            termination->cgroup = cgroup_session;
+            cgroup_session.fd = -1;
+            cgroup_session.parent_fd = -1;
+            termination->cgroup.name[0] = '\0';
+            termination->next = ctx->terminations;
+            ctx->terminations = termination;
+            termination = NULL;
+        }
+        pending_termination_release(termination);
+        dl_linux_cgroup_v2_session_release(&cgroup_session);
+        dl_linux_cgroup_v2_close(&parent);
+        if (r == -ENOENT || r == -ENODEV || r == -EACCES ||
+            r == -EPERM || r == -EXDEV || r == -EINVAL)
+            r = -ENOTSUP;
+        break;
+    }
     case SESSION_OP_KILL_ALL: {
         dl_linux_cgroup_v2 parent = {-1, {0}};
         dl_linux_cgroup_v2_session cgroup_session = {-1, -1, {0}};
         dl_process_identity leader = dl_session_leader(session);
-        int signo = pending->operation == SESSION_OP_TERMINATE ?
-                    SIGTERM : pending->signal_number;
         r = dl_linux_cgroup_v2_open_current(&parent);
         if (r < 0) {
             r = -ENOTSUP;
@@ -124,13 +189,10 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
         r = dl_linux_cgroup_v2_session_open(
             &parent, pending->session_id, &leader, &cgroup_session);
         if (r == 0) {
-            r = signo == SIGKILL ?
+            r = pending->signal_number == SIGKILL ?
                 dl_linux_cgroup_v2_session_kill_all(&cgroup_session) :
-                dl_linux_cgroup_v2_session_signal_all(&cgroup_session, signo);
-            if (r == 0 &&
-                dl_linux_cgroup_v2_session_close(&cgroup_session) != 0)
-                dl_linux_cgroup_v2_session_release(&cgroup_session);
-        } else if (cgroup_session.fd >= 0) {
+                dl_linux_cgroup_v2_session_signal_all(
+                    &cgroup_session, pending->signal_number);
             dl_linux_cgroup_v2_session_release(&cgroup_session);
         }
         dl_linux_cgroup_v2_close(&parent);
@@ -236,6 +298,72 @@ static void pending_authorizations_cancel(struct dbus_context *ctx)
         sd_bus_slot_unref(pending->slot);
         sd_bus_message_unref(pending->request);
         free(pending);
+    }
+}
+
+static struct pending_termination *pending_termination_find(
+    struct dbus_context *ctx, const char *session_id)
+{
+    struct pending_termination *p;
+    for (p = ctx ? ctx->terminations : NULL; p; p = p->next)
+        if (strcmp(p->session_id, session_id) == 0)
+            return p;
+    return NULL;
+}
+
+static void pending_termination_release(struct pending_termination *p)
+{
+    if (!p) return;
+    dl_linux_cgroup_v2_session_release(&p->cgroup);
+    free(p);
+}
+
+static int pending_termination_process(struct dbus_context *ctx)
+{
+    struct pending_termination **link;
+    struct timespec now;
+    bool have_time = clock_gettime(CLOCK_MONOTONIC, &now) == 0;
+    if (!ctx) return -EINVAL;
+
+    for (link = &ctx->terminations; *link;) {
+        struct pending_termination *p = *link;
+        int r;
+        if (have_time &&
+            (now.tv_sec < p->deadline.tv_sec ||
+             (now.tv_sec == p->deadline.tv_sec &&
+              now.tv_nsec < p->deadline.tv_nsec))) {
+            link = &p->next;
+            continue;
+        }
+        r = dl_linux_cgroup_v2_session_kill_all(&p->cgroup);
+        /* The daemon cgroup reaper only removes an empty cgroup. */
+        if (r == 0 || r == -ENOENT) {
+            *link = p->next;
+            pending_termination_release(p);
+            continue;
+        }
+        if (!p->warned) {
+            fprintf(stderr,
+                "dinit-logind: deferred SIGKILL for session %s failed (%d); retrying\n",
+                p->session_id, r);
+            p->warned = true;
+        }
+        link = &p->next;
+    }
+    return 0;
+}
+
+static void pending_terminations_finish(struct dbus_context *ctx)
+{
+    while (ctx && ctx->terminations) {
+        struct pending_termination *p = ctx->terminations;
+        int r = dl_linux_cgroup_v2_session_kill_all(&p->cgroup);
+        if (r < 0 && r != -ENOENT)
+            fprintf(stderr,
+                "dinit-logind: final SIGKILL for session %s failed (%d) during shutdown\n",
+                p->session_id, r);
+        ctx->terminations = p->next;
+        pending_termination_release(p);
     }
 }
 
@@ -1165,13 +1293,18 @@ int dl_dbus_get_events(const dl_dbus *dbus)
 
 int dl_dbus_process(dl_dbus *dbus)
 {
+    struct dbus_context *ctx;
     int r;
     if (!dbus || !dbus->bus) return -EINVAL;
     do {
         r = sd_bus_process(dbus->bus, NULL);
     } while (r > 0);
     if (r < 0) return r;
-    return process_core_events(dbus);
+    r = process_core_events(dbus);
+    if (r < 0) return r;
+    ctx = dbus->manager_slot ?
+          sd_bus_slot_get_userdata(dbus->manager_slot) : NULL;
+    return pending_termination_process(ctx);
 }
 
 void dl_dbus_close(dl_dbus *dbus)
@@ -1179,6 +1312,7 @@ void dl_dbus_close(dl_dbus *dbus)
     struct dbus_context *ctx = NULL;
     if (!dbus) return;
     if (dbus->manager_slot) ctx = sd_bus_slot_get_userdata(dbus->manager_slot);
+    pending_terminations_finish(ctx);
     pending_authorizations_cancel(ctx);
     sd_bus_slot_unref(dbus->seat_slot);
     sd_bus_slot_unref(dbus->user_slot);

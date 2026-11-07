@@ -60,6 +60,10 @@ void dl_linux_cgroup_v2_registry_reap(void);
 int dl_linux_cgroup_v2_session_signal_all(
     const dl_linux_cgroup_v2_session *session, int signal_number);
 
+/* Check that cgroup.kill is present and writable before accepting Terminate. */
+int dl_linux_cgroup_v2_session_kill_all_available(
+    const dl_linux_cgroup_v2_session *session);
+
 /* cgroup.kill is required; missing support returns -ENOTSUP. */
 int dl_linux_cgroup_v2_session_kill_all(
     const dl_linux_cgroup_v2_session *session);

@@ -423,6 +423,18 @@ void dl_linux_cgroup_v2_session_release(dl_linux_cgroup_v2_session *session)
     session->name[0] = '\0';
 }
 
+int dl_linux_cgroup_v2_session_kill_all_available(
+    const dl_linux_cgroup_v2_session *session)
+{
+    int fd;
+    if (session == NULL || session->fd < 0) return -EINVAL;
+    fd = openat(session->fd, "cgroup.kill",
+                O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return errno == ENOENT ? -ENOTSUP : -errno;
+    (void)close(fd);
+    return 0;
+}
+
 int dl_linux_cgroup_v2_session_kill_all(
     const dl_linux_cgroup_v2_session *session)
 {
