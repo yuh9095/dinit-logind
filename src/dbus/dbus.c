@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #include "dbus.h"
 #include "../platform/linux/process_identity.h"
+#include <signal.h>
 #include <errno.h>
 #include <pwd.h>
 #include <stdio.h>
@@ -17,6 +18,7 @@
 
 struct dbus_context {
     dl_manager *manager;
+    sd_bus *bus;
 };
 
 static int make_object_path(const char *kind, const char *id,
@@ -136,22 +138,15 @@ static int method_get_user_by_pid(sd_bus_message *m, void *userdata,
     struct dbus_context *ctx = userdata;
     uint32_t pid, uid;
     dl_process_identity identity;
-    dl_session *session;
     char path[256];
     int r;
 
     if (sd_bus_message_read(m, "u", &pid) < 0) return -EINVAL;
     r = identity_for_pid_argument(m, pid, &identity);
-    if (r < 0)
+    if (r < 0 || dl_linux_process_uid_read(identity.pid, &uid) != DL_OK)
         return sd_bus_error_setf(ret_error,
             "org.freedesktop.login1.NoUserForPID",
-            "PID %u does not belong to a tracked user session", pid);
-    session = dl_session_find_by_identity(ctx->manager, &identity);
-    if (session == NULL)
-        return sd_bus_error_setf(ret_error,
-            "org.freedesktop.login1.NoUserForPID",
-            "PID %u does not belong to a tracked user session", pid);
-    uid = dl_session_uid(session);
+            "PID %u has no readable, stable user identity", pid);
     if (dl_user_find(ctx->manager, uid) == NULL)
         return sd_bus_error_setf(ret_error,
             "org.freedesktop.login1.NoUserForPID",
@@ -518,6 +513,138 @@ static int seat_property(sd_bus *bus, const char *path, const char *interface,
     return property_unknown(error, property);
 }
 
+
+static int session_from_message(sd_bus_message *m, struct dbus_context *ctx,
+                                dl_session **ret_session)
+{
+    const char *path = sd_bus_message_get_path(m);
+    char id[DL_SESSION_ID_MAX];
+    dl_session *session;
+    if (!path || decode_component(path, DL_LOGIN1_PATH "/session/",
+                                  id, sizeof(id)) < 0)
+        return -EINVAL;
+    session = dl_session_find(ctx->manager, id);
+    if (!session || dl_session_get_state(session) == DL_SESSION_CLOSED)
+        return -ENOENT;
+    *ret_session = session;
+    return 0;
+}
+
+static int authorize_session_owner(sd_bus_message *m, const dl_session *session,
+                                   sd_bus_error *error)
+{
+    sd_bus_creds *creds = NULL;
+    uid_t euid;
+    int r = sd_bus_query_sender_creds(m, SD_BUS_CREDS_EUID, &creds);
+    if (r < 0) return r;
+    r = sd_bus_creds_get_euid(creds, &euid);
+    sd_bus_creds_unref(creds);
+    if (r < 0) return r;
+    if (euid != 0 && (uint32_t)euid != dl_session_uid(session))
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.AccessDenied",
+                                      "Only root or the session owner may operate this session");
+    return 0;
+}
+
+static int method_session_activate(sd_bus_message *m, void *userdata,
+                                   sd_bus_error *error)
+{
+    struct dbus_context *ctx = userdata;
+    dl_session *session;
+    int r = session_from_message(m, ctx, &session);
+    if (r < 0)
+        return sd_bus_error_set_const(error, "org.freedesktop.login1.NoSuchSession",
+                                      "Session no longer exists");
+    r = authorize_session_owner(m, session, error);
+    if (r < 0) return r;
+    r = dl_session_activate(ctx->manager, dl_session_id(session));
+    if (r != DL_OK)
+        return sd_bus_error_set_const(error, "org.freedesktop.login1.OperationFailed",
+                                      "Unable to activate session");
+    return sd_bus_reply_method_return(m, "");
+}
+
+static int method_session_terminate(sd_bus_message *m, void *userdata,
+                                    sd_bus_error *error)
+{
+    struct dbus_context *ctx = userdata;
+    dl_session *session;
+    dl_process_identity leader;
+    int r = session_from_message(m, ctx, &session);
+    if (r < 0)
+        return sd_bus_error_set_const(error, "org.freedesktop.login1.NoSuchSession",
+                                      "Session no longer exists");
+    r = authorize_session_owner(m, session, error);
+    if (r < 0) return r;
+    leader = dl_session_leader(session);
+    r = dl_linux_process_signal(&leader, SIGTERM);
+    if (r == -ENOTSUP)
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.NotSupported",
+                                      "Safe process signaling requires pidfd support");
+    if (r < 0)
+        return sd_bus_error_setf(error, "org.freedesktop.login1.OperationFailed",
+                                 "Unable to terminate session leader: %s", strerror(-r));
+    /* SessionRemoved is emitted only when PAM/core lifecycle confirms closure. */
+    return sd_bus_reply_method_return(m, "");
+}
+
+static int method_session_kill(sd_bus_message *m, void *userdata,
+                               sd_bus_error *error)
+{
+    struct dbus_context *ctx = userdata;
+    const char *whom;
+    int32_t signo;
+    dl_session *session;
+    dl_process_identity leader;
+    int r = sd_bus_message_read(m, "si", &whom, &signo);
+    if (r < 0) return r;
+    if (!whom || (strcmp(whom, "leader") != 0 && strcmp(whom, "") != 0 &&
+                  strcmp(whom, "all") != 0))
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.InvalidArgs",
+                                      "Kill target must be 'leader' or 'all'");
+    if (signo <= 0 || signo >= NSIG)
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.InvalidArgs",
+                                      "Invalid signal number");
+    if (strcmp(whom, "all") == 0 || strcmp(whom, "") == 0)
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.NotSupported",
+                                      "Whole-session signaling requires cgroup process tracking");
+    r = session_from_message(m, ctx, &session);
+    if (r < 0)
+        return sd_bus_error_set_const(error, "org.freedesktop.login1.NoSuchSession",
+                                      "Session no longer exists");
+    r = authorize_session_owner(m, session, error);
+    if (r < 0) return r;
+    leader = dl_session_leader(session);
+    r = dl_linux_process_signal(&leader, signo);
+    if (r == -ENOTSUP)
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.NotSupported",
+                                      "Safe process signaling requires pidfd support");
+    if (r < 0)
+        return sd_bus_error_setf(error, "org.freedesktop.login1.OperationFailed",
+                                 "Unable to signal session leader: %s", strerror(-r));
+    return sd_bus_reply_method_return(m, "");
+}
+
+static int method_session_lock(sd_bus_message *m, void *userdata,
+                               sd_bus_error *error)
+{
+    struct dbus_context *ctx = userdata;
+    dl_session *session;
+    const char *path = sd_bus_message_get_path(m);
+    const char *member = sd_bus_message_get_member(m);
+    int r = session_from_message(m, ctx, &session);
+    if (r < 0)
+        return sd_bus_error_set_const(error, "org.freedesktop.login1.NoSuchSession",
+                                      "Session no longer exists");
+    r = authorize_session_owner(m, session, error);
+    if (r < 0) return r;
+    if (!path || !member) return -EINVAL;
+    r = sd_bus_emit_signal(ctx->bus, path, "org.freedesktop.login1.Session",
+                           member, "");
+    if (r < 0) return r;
+    return sd_bus_reply_method_return(m, "");
+}
+
 static const sd_bus_vtable session_vtable[] = {
     SD_BUS_VTABLE_START(0),
     SD_BUS_PROPERTY("Id", "s", session_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
@@ -544,6 +671,11 @@ static const sd_bus_vtable session_vtable[] = {
     SD_BUS_PROPERTY("IdleHint", "b", session_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
     SD_BUS_PROPERTY("IdleSinceHint", "t", session_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
     SD_BUS_PROPERTY("IdleSinceHintMonotonic", "t", session_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_METHOD("Activate", "", "", method_session_activate, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("Terminate", "", "", method_session_terminate, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("Kill", "si", "", method_session_kill, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("Lock", "", "", method_session_lock, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("Unlock", "", "", method_session_lock, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_VTABLE_END
 };
 
@@ -700,6 +832,7 @@ static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
         sd_bus_slot_unref(dbus->manager_slot);
         sd_bus_unref(dbus->bus); dbus->bus = NULL; free(ctx); return r;
     }
+    ctx->bus = dbus->bus;
     r = sd_bus_request_name(dbus->bus, DL_LOGIN1_NAME, 0);
     if (r < 0) {
         sd_bus_slot_unref(dbus->seat_slot);

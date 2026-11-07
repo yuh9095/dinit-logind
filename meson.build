@@ -16,19 +16,19 @@ core_lib = static_library(
   install: false,
 )
 
-dbus_lib = static_library(
-  'dinit-logind-dbus',
-  'src/dbus/dbus.c',
-  include_directories: include_directories('src/core', 'src/dbus'),
-  dependencies: libsystemd_dep,
-  link_with: core_lib,
-  install: false,
-)
-
 linux_identity_lib = static_library(
   'dinit-logind-linux-identity',
   'src/platform/linux/process_identity.c',
   include_directories: include_directories('src/core', 'src/platform/linux'),
+  install: false,
+)
+
+dbus_lib = static_library(
+  'dinit-logind-dbus',
+  'src/dbus/dbus.c',
+  include_directories: include_directories('src/core', 'src/dbus', 'src/platform/linux'),
+  dependencies: libsystemd_dep,
+  link_with: [core_lib, linux_identity_lib],
   install: false,
 )
 

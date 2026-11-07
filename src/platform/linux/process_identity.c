@@ -8,6 +8,8 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <signal.h>
+#include <sys/syscall.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -120,4 +122,96 @@ out:
     if (proc_fd >= 0) (void)close(proc_fd);
     if (result != DL_OK && identity != NULL) memset(identity, 0, sizeof(*identity));
     return result;
+}
+
+/* Read the effective UID while verifying that /proc/PID did not change
+ * identity during the read. The PID namespace and start-time tuple is the
+ * same identity used by session leader tracking. */
+dl_result dl_linux_process_uid_read(uint32_t pid, uint32_t *uid)
+{
+    char pid_text[32], buffer[8192];
+    int proc_fd = -1, process_fd = -1, status_fd = -1;
+    size_t used = 0;
+    uint64_t before = 0, after = 0;
+    char *line, *saveptr = NULL;
+    dl_result result = DL_ERR_STATE;
+
+    if (uid) *uid = 0;
+    if (!uid || pid == 0 || pid > (uint32_t)INT_MAX) return DL_ERR_INVALID;
+    if (snprintf(pid_text, sizeof(pid_text), "%u", pid) >= (int)sizeof(pid_text))
+        return DL_ERR_INVALID;
+    proc_fd = open("/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (proc_fd < 0) goto out;
+    process_fd = openat(proc_fd, pid_text, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (process_fd < 0) {
+        result = (errno == ENOENT || errno == ESRCH) ? DL_ERR_NOT_FOUND : DL_ERR_STATE;
+        goto out;
+    }
+    if (!read_start_time_at(process_fd, &before)) goto out;
+    status_fd = openat(process_fd, "status", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (status_fd < 0) goto out;
+    while (used + 1 < sizeof(buffer)) {
+        ssize_t n = read(status_fd, buffer + used, sizeof(buffer) - used - 1);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            goto out;
+        }
+        if (n == 0) break;
+        used += (size_t)n;
+    }
+    if (used + 1 == sizeof(buffer)) goto out;
+    buffer[used] = '\0';
+    for (line = strtok_r(buffer, "\n", &saveptr); line;
+         line = strtok_r(NULL, "\n", &saveptr)) {
+        if (strncmp(line, "Uid:", 4) == 0) {
+            unsigned long effective_uid;
+            if (sscanf(line + 4, "%*lu %lu %*u %*u",
+                       &effective_uid) != 1 ||
+                effective_uid > UINT32_MAX)
+                goto out;
+            if (!read_start_time_at(process_fd, &after) || before != after)
+                goto out;
+            *uid = (uint32_t)effective_uid;
+            result = DL_OK;
+            goto out;
+        }
+    }
+out:
+    if (status_fd >= 0) (void)close(status_fd);
+    if (process_fd >= 0) (void)close(process_fd);
+    if (proc_fd >= 0) (void)close(proc_fd);
+    if (result != DL_OK) *uid = 0;
+    return result;
+}
+
+/* pidfd pins the target task so PID reuse cannot redirect a signal. There is
+ * deliberately no kill(2) fallback: kernels without pidfd signaling fail
+ * closed rather than introducing a check/use race. */
+int dl_linux_process_signal(const dl_process_identity *identity, int signal_number)
+{
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+    dl_process_identity current;
+    int pidfd, r, saved_errno;
+
+    if (!identity || identity->pid == 0 ||
+        identity->pid > (uint32_t)INT_MAX ||
+        identity->pid_namespace_inode == 0 || signal_number <= 0)
+        return -EINVAL;
+    pidfd = (int)syscall(SYS_pidfd_open, (pid_t)identity->pid, 0);
+    if (pidfd < 0) return errno == ENOSYS ? -ENOTSUP : -errno;
+    if (dl_linux_process_identity_read(identity->pid, &current) != DL_OK ||
+        current.pid_namespace_inode != identity->pid_namespace_inode ||
+        current.process_start_time != identity->process_start_time) {
+        (void)close(pidfd);
+        return -ESRCH;
+    }
+    r = (int)syscall(SYS_pidfd_send_signal, pidfd, signal_number, NULL, 0);
+    saved_errno = errno;
+    (void)close(pidfd);
+    return r < 0 ? (saved_errno == ENOSYS ? -ENOTSUP : -saved_errno) : 0;
+#else
+    (void)identity;
+    (void)signal_number;
+    return -ENOTSUP;
+#endif
 }

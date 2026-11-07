@@ -5,6 +5,8 @@
 
 #include <errno.h>
 #include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdatomic.h>
@@ -28,6 +30,8 @@ struct server_state {
 static int session_new_count;
 static int session_removed_count;
 static int properties_changed_count;
+static int lock_signal_count;
+static int unlock_signal_count;
 
 static int signal_counter(sd_bus_message *message, void *userdata,
                           sd_bus_error *error)
@@ -39,6 +43,10 @@ static int signal_counter(sd_bus_message *message, void *userdata,
     else if (member && strcmp(member, "SessionRemoved") == 0) ++session_removed_count;
     else if (member && strcmp(member, "PropertiesChanged") == 0)
         ++properties_changed_count;
+    else if (member && strcmp(member, "Lock") == 0)
+        ++lock_signal_count;
+    else if (member && strcmp(member, "Unlock") == 0)
+        ++unlock_signal_count;
     ++*counter;
     return 0;
 }
@@ -108,12 +116,18 @@ int main(void)
     pthread_t thread;
     sd_bus *client = NULL;
     sd_bus_slot *new_slot = NULL, *removed_slot = NULL, *changed_slot = NULL;
+    sd_bus_slot *lock_slot = NULL, *unlock_slot = NULL;
     sd_bus_message *reply = NULL;
     sd_bus_error error = SD_BUS_ERROR_NULL;
     char object_path[256], user_path[256], seat_path[256];
     const char *returned_path = NULL;
     int callback_count = 0, r, result = 1, stage = 0;
     int active = 1;
+    pid_t child_pid = -1;
+    int child_status;
+    dl_session_spec child_spec;
+    dl_session *child_session = NULL;
+    char child_path[256];
 
     if (!address) {
         fprintf(stderr, "DBUS_SESSION_BUS_ADDRESS is not set\n");
@@ -141,6 +155,14 @@ int main(void)
     if (r < 0) goto finish;
     r = sd_bus_add_match(client, &changed_slot,
         "type='signal',sender='org.freedesktop.login1',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'",
+        signal_counter, &callback_count);
+    if (r < 0) goto finish;
+    r = sd_bus_add_match(client, &lock_slot,
+        "type='signal',sender='org.freedesktop.login1',interface='org.freedesktop.login1.Session',member='Lock'",
+        signal_counter, &callback_count);
+    if (r < 0) goto finish;
+    r = sd_bus_add_match(client, &unlock_slot,
+        "type='signal',sender='org.freedesktop.login1',interface='org.freedesktop.login1.Session',member='Unlock'",
         signal_counter, &callback_count);
     if (r < 0) goto finish;
 
@@ -276,10 +298,11 @@ int main(void)
     reply = NULL;
 
     stage = 13;
-    pthread_mutex_lock(&server.lock);
-    r = dl_session_activate(manager, dl_session_id(session));
-    pthread_mutex_unlock(&server.lock);
-    if (r != DL_OK) goto stop_server;
+    r = sd_bus_call_method(client, LOGIN1_NAME, object_path, SESSION_IFACE,
+                           "Activate", &error, &reply, "");
+    if (r < 0) goto stop_server;
+    sd_bus_message_unref(reply);
+    reply = NULL;
     stage = 14;
     if (pump_until(client, &properties_changed_count, 3) < 0) goto stop_server;
     active = 0;
@@ -287,13 +310,126 @@ int main(void)
         SESSION_IFACE, "Active", &error, 'b', &active);
     if (r < 0 || active != 1) goto stop_server;
 
+
     stage = 15;
+    r = sd_bus_call_method(client, LOGIN1_NAME, object_path, SESSION_IFACE,
+                           "Lock", &error, &reply, "");
+    if (r < 0) goto stop_server;
+    sd_bus_message_unref(reply);
+    reply = NULL;
+    if (pump_until(client, &lock_signal_count, 1) < 0 || lock_signal_count != 1)
+        goto stop_server;
+
+    stage = 16;
+    r = sd_bus_call_method(client, LOGIN1_NAME, object_path, SESSION_IFACE,
+                           "Unlock", &error, &reply, "");
+    if (r < 0) goto stop_server;
+    sd_bus_message_unref(reply);
+    reply = NULL;
+    if (pump_until(client, &unlock_signal_count, 1) < 0 || unlock_signal_count != 1)
+        goto stop_server;
+
+    stage = 17;
+    r = sd_bus_call_method(client, LOGIN1_NAME, object_path, SESSION_IFACE,
+                           "Kill", &error, &reply, "si", "all", SIGTERM);
+    if (r >= 0 || !sd_bus_error_has_name(&error,
+            "org.freedesktop.DBus.Error.NotSupported"))
+        goto stop_server;
+    sd_bus_error_free(&error);
+    sd_bus_message_unref(reply);
+    reply = NULL;
+
+    stage = 18;
+    child_pid = fork();
+    if (child_pid < 0) goto stop_server;
+    if (child_pid == 0) {
+        for (;;) pause();
+    }
+    memset(&child_spec, 0, sizeof(child_spec));
+    child_spec.uid = (uint32_t)getuid();
+    if (dl_linux_process_identity_read((uint32_t)child_pid, &child_spec.leader) != DL_OK)
+        goto stop_server;
+    child_spec.service = "test-kill";
+    child_spec.type = "tty";
+    child_spec.session_class = "user";
+    r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
+                           "GetUserByPID", &error, &reply, "u",
+                           (uint32_t)child_pid);
+    if (r < 0 || sd_bus_message_read(reply, "o", &returned_path) < 0 ||
+        strcmp(returned_path, user_path) != 0)
+        goto stop_server;
+    sd_bus_message_unref(reply);
+    reply = NULL;
+    pthread_mutex_lock(&server.lock);
+    r = dl_session_create(manager, &child_spec, &child_session);
+    pthread_mutex_unlock(&server.lock);
+    if (r != DL_OK) goto stop_server;
+    r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
+                           "GetSession", &error, &reply, "s", dl_session_id(child_session));
+    if (r < 0 || sd_bus_message_read(reply, "o", &returned_path) < 0)
+        goto stop_server;
+    (void)snprintf(child_path, sizeof(child_path), "%s", returned_path);
+    sd_bus_message_unref(reply);
+    reply = NULL;
+    r = sd_bus_call_method(client, LOGIN1_NAME, child_path, SESSION_IFACE,
+                           "Kill", &error, &reply, "si", "leader", SIGTERM);
+    if (r < 0) goto stop_server;
+    sd_bus_message_unref(reply);
+    reply = NULL;
+    if (waitpid(child_pid, &child_status, 0) != child_pid ||
+        !WIFSIGNALED(child_status) || WTERMSIG(child_status) != SIGTERM)
+        goto stop_server;
+    child_pid = -1;
+    pthread_mutex_lock(&server.lock);
+    r = dl_session_close(manager, dl_session_id(child_session));
+    pthread_mutex_unlock(&server.lock);
+    if (r != DL_OK) goto stop_server;
+
+    stage = 19;
+    child_pid = fork();
+    if (child_pid < 0) goto stop_server;
+    if (child_pid == 0) {
+        for (;;) pause();
+    }
+    memset(&child_spec, 0, sizeof(child_spec));
+    child_spec.uid = (uint32_t)getuid();
+    if (dl_linux_process_identity_read((uint32_t)child_pid, &child_spec.leader) != DL_OK)
+        goto stop_server;
+    child_spec.service = "test-terminate";
+    child_spec.type = "tty";
+    child_spec.session_class = "user";
+    pthread_mutex_lock(&server.lock);
+    r = dl_session_create(manager, &child_spec, &child_session);
+    pthread_mutex_unlock(&server.lock);
+    if (r != DL_OK) goto stop_server;
+    r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
+                           "GetSession", &error, &reply, "s", dl_session_id(child_session));
+    if (r < 0 || sd_bus_message_read(reply, "o", &returned_path) < 0)
+        goto stop_server;
+    (void)snprintf(child_path, sizeof(child_path), "%s", returned_path);
+    sd_bus_message_unref(reply);
+    reply = NULL;
+    r = sd_bus_call_method(client, LOGIN1_NAME, child_path, SESSION_IFACE,
+                           "Terminate", &error, &reply, "");
+    if (r < 0) goto stop_server;
+    sd_bus_message_unref(reply);
+    reply = NULL;
+    if (waitpid(child_pid, &child_status, 0) != child_pid ||
+        !WIFSIGNALED(child_status) || WTERMSIG(child_status) != SIGTERM)
+        goto stop_server;
+    child_pid = -1;
+    pthread_mutex_lock(&server.lock);
+    r = dl_session_close(manager, dl_session_id(child_session));
+    pthread_mutex_unlock(&server.lock);
+    if (r != DL_OK) goto stop_server;
+
+    stage = 20;
     pthread_mutex_lock(&server.lock);
     r = dl_session_close(manager, dl_session_id(session));
     pthread_mutex_unlock(&server.lock);
     if (r != DL_OK) goto stop_server;
     stage = 16;
-    if (pump_until(client, &session_removed_count, 1) < 0 || session_removed_count != 1)
+    if (pump_until(client, &session_removed_count, 3) < 0 || session_removed_count != 3)
         goto stop_server;
 
     r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
@@ -303,6 +439,10 @@ int main(void)
     result = 0;
 
 stop_server:
+    if (child_pid > 0) {
+        (void)kill(child_pid, SIGKILL);
+        (void)waitpid(child_pid, NULL, 0);
+    }
     if (result != 0)
         fprintf(stderr, "D-Bus integration failed at stage %d (r=%d, error=%s: %s)\n",
                 stage, r, error.name ? error.name : "-",
@@ -316,6 +456,8 @@ finish:
     sd_bus_message_unref(reply);
     sd_bus_error_free(&error);
     sd_bus_slot_unref(changed_slot);
+    sd_bus_slot_unref(lock_slot);
+    sd_bus_slot_unref(unlock_slot);
     sd_bus_slot_unref(removed_slot);
     sd_bus_slot_unref(new_slot);
     sd_bus_unref(client);

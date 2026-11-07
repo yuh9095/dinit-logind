@@ -10,6 +10,10 @@ extern "C" {
 #endif
 /* PID must come from authenticated transport credentials such as SO_PEERCRED. */
 dl_result dl_linux_process_identity_read(uint32_t pid, dl_process_identity *identity);
+dl_result dl_linux_process_uid_read(uint32_t pid, uint32_t *uid);
+int dl_linux_process_signal(const dl_process_identity *identity, int signal_number);
+dl_result dl_linux_process_uid_read(uint32_t pid, uint32_t *uid);
+int dl_linux_process_signal(const dl_process_identity *identity, int signal_number);
 #ifdef __cplusplus
 }
 #endif
