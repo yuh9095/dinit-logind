@@ -9,15 +9,15 @@ permissions:
   contents: read
 
 jobs:
-  meson-setup:
-    name: Meson project, daemon and PAM validation
+  glibc:
+    name: Ubuntu (glibc) build and tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install build tools and PAM headers
+      - name: Install build tools and development headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y meson ninja-build libpam0g-dev libsystemd-dev dbus
+          sudo apt-get install -y meson ninja-build pkg-config libpam0g-dev libsystemd-dev dbus
       - name: Configure
         run: meson setup builddir
       - name: Compile
@@ -28,3 +28,27 @@ jobs:
         run: |
           builddir/dinit-logind --version
           builddir/dinit-logind --help
+
+  musl:
+    name: Alpine Linux (musl) build and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test inside Alpine musl
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" \
+            -w /src \
+            alpine:3.23 \
+            sh -euxc '
+              apk add --no-cache build-base meson ninja pkgconf linux-pam-dev elogind-dev dbus
+              echo "C library:"
+              ldd --version 2>&1 | head -n 1
+              echo "sd-bus compatibility provider:"
+              pkg-config --modversion libsystemd
+              meson setup builddir-musl
+              meson compile -C builddir-musl
+              meson test -C builddir-musl --print-errorlogs
+              builddir-musl/dinit-logind --version
+              builddir-musl/dinit-logind --help
+            '

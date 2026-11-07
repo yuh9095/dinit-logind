@@ -2,7 +2,7 @@
 
 A native login and seat-management service for Dinit systems.
 
-> Status: project scaffold / design phase. This repository does not yet provide a working login manager, PAM module, D-Bus service, or power-management implementation.
+> Status: active implementation. Core session/user/seat tracking, PAM ingress foundations, daemon runtime, and an initial login1 Manager D-Bus discovery interface are implemented. Full systemd-logind compatibility is not yet complete.
 
 ## Goals
 
@@ -21,16 +21,24 @@ A native login and seat-management service for Dinit systems.
 4. Power operations must detect capabilities and container boundaries conservatively, failing closed when host-safe behavior is uncertain.
 5. Audit, document provenance and licensing, implement incrementally, and test each subsystem.
 6. Preserve expected behavior outside containers and avoid unrelated behavior changes.
+7. Keep the implementation portable across glibc and musl; do not assume GNU libc extensions where portable POSIX/Linux interfaces suffice.
 
-## Planned subsystems
+## Implemented areas
 
-Session/user tracking; PAM integration; runtime directory and linger; seat/VT/device management; inhibitors; power policy; login1-compatible D-Bus; Dinit backend; Polkit integration.
+- Core User, Session, and Seat state model and enumeration.
+- PAM session ingress foundations and peer/process identity validation.
+- Daemon runtime and configuration.
+- Initial login1 Manager D-Bus discovery methods: GetSession, GetUser, GetSeat, ListSessions, ListUsers, and ListSeats.
 
-See docs/architecture.md and docs/login1-compatibility.md.
+Returned Session/User/Seat object paths are not yet equivalent to complete exported login1 objects. See `src/dbus/README.md` and `docs/login1-compatibility.md` for the current boundary.
 
-## Build status
+## Build and portability validation
 
-The initial repository is a documentation and build-system scaffold. There is no daemon target or functional test suite yet. Initial CI validates the Meson project setup only; it is not feature validation.
+CI currently validates both:
+- Ubuntu with glibc, using the distribution's `libsystemd` development package.
+- Alpine Linux with musl, using Alpine's `elogind-dev` package, which supplies a `libsystemd.pc`-compatible sd-bus development interface and library.
+
+The Alpine job is a musl portability/build/test check; it does not claim that elogind is a runtime dependency or that systemd is required as PID 1. Runtime D-Bus integration and full login1 behavioral compatibility require additional dedicated tests.
 
 ## License
 
