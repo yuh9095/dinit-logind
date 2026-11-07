@@ -16,10 +16,197 @@
 #define DL_LOGIN1_PATH "/org/freedesktop/login1"
 #define DL_LOGIN1_IFACE "org.freedesktop.login1.Manager"
 
+enum session_operation {
+    SESSION_OP_ACTIVATE,
+    SESSION_OP_TERMINATE,
+    SESSION_OP_KILL_LEADER,
+    SESSION_OP_LOCK,
+    SESSION_OP_UNLOCK
+};
+
+struct pending_authorization {
+    struct dbus_context *ctx;
+    sd_bus_slot *slot;
+    sd_bus_message *request;
+    char session_id[DL_SESSION_ID_MAX];
+    enum session_operation operation;
+    struct pending_authorization *next;
+};
+
 struct dbus_context {
     dl_manager *manager;
     sd_bus *bus;
+    struct pending_authorization *pending;
 };
+
+static void pending_authorization_remove(struct pending_authorization *pending)
+{
+    struct pending_authorization **link;
+    if (!pending || !pending->ctx) return;
+    for (link = &pending->ctx->pending; *link; link = &(*link)->next) {
+        if (*link == pending) {
+            *link = pending->next;
+            break;
+        }
+    }
+}
+
+static void pending_authorization_free(struct pending_authorization *pending)
+{
+    if (!pending) return;
+    pending_authorization_remove(pending);
+    sd_bus_slot_unref(pending->slot);
+    sd_bus_message_unref(pending->request);
+    free(pending);
+}
+
+static int session_authorization_reply(sd_bus_message *reply, void *userdata,
+                                       sd_bus_error *ret_error)
+{
+    struct pending_authorization *pending = userdata;
+    struct dbus_context *ctx = pending->ctx;
+    dl_session *session = NULL;
+    int authorized = 0, challenge = 0, r = 0;
+    const char *member = NULL;
+    sd_bus_error error = SD_BUS_ERROR_NULL;
+    (void)ret_error;
+
+    if (sd_bus_message_is_method_error(reply, NULL) > 0 ||
+        sd_bus_message_read(reply, "bb", &authorized, &challenge) < 0 ||
+        sd_bus_message_skip(reply, "a{ss}") < 0 ||
+        sd_bus_message_at_end(reply, 1) <= 0 || !authorized) {
+        sd_bus_error_set_const(&error, "org.freedesktop.DBus.Error.AccessDenied",
+                               challenge ? "Polkit authorization requires interaction" :
+                                           "Polkit authorization was denied or unavailable");
+        (void)sd_bus_reply_method_error(pending->request, &error);
+        sd_bus_error_free(&error);
+        pending_authorization_free(pending);
+        return 1;
+    }
+
+    session = dl_session_find(ctx->manager, pending->session_id);
+    if (!session || dl_session_get_state(session) == DL_SESSION_CLOSED) {
+        sd_bus_error_set_const(&error, "org.freedesktop.login1.NoSuchSession",
+                               "Session closed while authorization was pending");
+        (void)sd_bus_reply_method_error(pending->request, &error);
+        sd_bus_error_free(&error);
+        pending_authorization_free(pending);
+        return 1;
+    }
+
+    switch (pending->operation) {
+    case SESSION_OP_ACTIVATE:
+        if (dl_session_activate(ctx->manager, dl_session_id(session)) != DL_OK)
+            r = -EIO;
+        break;
+    case SESSION_OP_TERMINATE: {
+        dl_process_identity leader = dl_session_leader(session);
+        r = dl_linux_process_signal(&leader, SIGTERM);
+        break;
+    }
+    case SESSION_OP_KILL_LEADER: {
+        int32_t signo = 0;
+        /* The signal is stored in the original method message. */
+        if (sd_bus_message_rewind(pending->request, 1) < 0 ||
+            sd_bus_message_read(pending->request, "si", &member, &signo) < 0)
+            r = -EINVAL;
+        else {
+            dl_process_identity leader = dl_session_leader(session);
+            r = dl_linux_process_signal(&leader, signo);
+        }
+        break;
+    }
+    case SESSION_OP_LOCK:
+    case SESSION_OP_UNLOCK:
+        member = pending->operation == SESSION_OP_LOCK ? "Lock" : "Unlock";
+        r = sd_bus_emit_signal(ctx->bus, sd_bus_message_get_path(pending->request),
+                               "org.freedesktop.login1.Session", member, "");
+        break;
+    }
+
+    if (r < 0) {
+        sd_bus_error_set_const(&error,
+            r == -ENOTSUP ? "org.freedesktop.DBus.Error.NotSupported" :
+                            "org.freedesktop.login1.OperationFailed",
+            r == -ENOTSUP ? "Safe process signaling requires pidfd support" :
+                            "The authorized session operation failed");
+        (void)sd_bus_reply_method_error(pending->request, &error);
+    } else {
+        (void)sd_bus_reply_method_return(pending->request, "");
+    }
+    sd_bus_error_free(&error);
+    pending_authorization_free(pending);
+    return 1;
+}
+
+static int authorize_session_async(sd_bus_message *m, struct dbus_context *ctx,
+                                   const char *action,
+                                   enum session_operation operation,
+                                   sd_bus_error *error)
+{
+    struct pending_authorization *pending = NULL;
+    sd_bus_message *call = NULL;
+    dl_session *session = NULL;
+    const char *sender;
+    int r;
+
+    r = session_from_message(m, ctx, &session);
+    if (r < 0)
+        return sd_bus_error_set_const(error, "org.freedesktop.login1.NoSuchSession",
+                                      "Session no longer exists");
+    sender = sd_bus_message_get_sender(m);
+    if (!sender || sender[0] != ':')
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.AccessDenied",
+                                      "A unique D-Bus sender is required for authorization");
+
+    pending = calloc(1, sizeof(*pending));
+    if (!pending)
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.NoMemory",
+                                      "Unable to allocate authorization request");
+    pending->ctx = ctx;
+    pending->operation = operation;
+    (void)snprintf(pending->session_id, sizeof(pending->session_id), "%s",
+                   dl_session_id(session));
+    pending->request = sd_bus_message_ref(m);
+    pending->next = ctx->pending;
+    ctx->pending = pending;
+
+    r = sd_bus_message_new_method_call(ctx->bus, &call,
+        "org.freedesktop.PolicyKit1", "/org/freedesktop/PolicyKit1/Authority",
+        "org.freedesktop.PolicyKit1.Authority", "CheckAuthorization");
+    if (r >= 0) r = sd_bus_message_open_container(call, 'r', "sa{sv}");
+    if (r >= 0) r = sd_bus_message_append(call, "s", "system-bus-name");
+    if (r >= 0) r = sd_bus_message_open_container(call, 'a', "{sv}");
+    if (r >= 0) r = sd_bus_message_append(call, "{sv}", "name", "s", sender);
+    if (r >= 0) r = sd_bus_message_close_container(call);
+    if (r >= 0) r = sd_bus_message_close_container(call);
+    if (r >= 0) r = sd_bus_message_append(call, "s", action);
+    if (r >= 0) r = sd_bus_message_open_container(call, 'a', "{ss}");
+    if (r >= 0) r = sd_bus_message_close_container(call);
+    if (r >= 0) r = sd_bus_message_append(call, "us", 1u, "");
+    if (r >= 0) r = sd_bus_call_async(ctx->bus, &pending->slot, call,
+                                      session_authorization_reply, pending,
+                                      30ULL * 1000ULL * 1000ULL);
+    sd_bus_message_unref(call);
+    if (r < 0) {
+        pending_authorization_free(pending);
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.AccessDenied",
+                                      "Unable to contact Polkit authority");
+    }
+    return 1;
+}
+
+static void pending_authorizations_cancel(struct dbus_context *ctx)
+{
+    while (ctx && ctx->pending) {
+        struct pending_authorization *pending = ctx->pending;
+        ctx->pending = pending->next;
+        pending->ctx = NULL;
+        sd_bus_slot_unref(pending->slot);
+        sd_bus_message_unref(pending->request);
+        free(pending);
+    }
+}
 
 static int make_object_path(const char *kind, const char *id,
                             char *buffer, size_t size)
@@ -530,72 +717,25 @@ static int session_from_message(sd_bus_message *m, struct dbus_context *ctx,
     return 0;
 }
 
-static int authorize_session_owner(sd_bus_message *m, const dl_session *session,
-                                   sd_bus_error *error)
-{
-    sd_bus_creds *creds = NULL;
-    uid_t euid;
-    int r = sd_bus_query_sender_creds(m, SD_BUS_CREDS_EUID, &creds);
-    if (r < 0) return r;
-    r = sd_bus_creds_get_euid(creds, &euid);
-    sd_bus_creds_unref(creds);
-    if (r < 0) return r;
-    if (euid != 0 && (uint32_t)euid != dl_session_uid(session))
-        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.AccessDenied",
-                                      "Only root or the session owner may operate this session");
-    return 0;
-}
-
 static int method_session_activate(sd_bus_message *m, void *userdata,
                                    sd_bus_error *error)
 {
-    struct dbus_context *ctx = userdata;
-    dl_session *session;
-    int r = session_from_message(m, ctx, &session);
-    if (r < 0)
-        return sd_bus_error_set_const(error, "org.freedesktop.login1.NoSuchSession",
-                                      "Session no longer exists");
-    r = authorize_session_owner(m, session, error);
-    if (r < 0) return r;
-    r = dl_session_activate(ctx->manager, dl_session_id(session));
-    if (r != DL_OK)
-        return sd_bus_error_set_const(error, "org.freedesktop.login1.OperationFailed",
-                                      "Unable to activate session");
-    return sd_bus_reply_method_return(m, "");
+    return authorize_session_async(m, userdata, "org.freedesktop.login1.chvt",
+                                   SESSION_OP_ACTIVATE, error);
 }
 
 static int method_session_terminate(sd_bus_message *m, void *userdata,
                                     sd_bus_error *error)
 {
-    struct dbus_context *ctx = userdata;
-    dl_session *session;
-    dl_process_identity leader;
-    int r = session_from_message(m, ctx, &session);
-    if (r < 0)
-        return sd_bus_error_set_const(error, "org.freedesktop.login1.NoSuchSession",
-                                      "Session no longer exists");
-    r = authorize_session_owner(m, session, error);
-    if (r < 0) return r;
-    leader = dl_session_leader(session);
-    r = dl_linux_process_signal(&leader, SIGTERM);
-    if (r == -ENOTSUP)
-        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.NotSupported",
-                                      "Safe process signaling requires pidfd support");
-    if (r < 0)
-        return sd_bus_error_setf(error, "org.freedesktop.login1.OperationFailed",
-                                 "Unable to terminate session leader: %s", strerror(-r));
-    /* SessionRemoved is emitted only when PAM/core lifecycle confirms closure. */
-    return sd_bus_reply_method_return(m, "");
+    return authorize_session_async(m, userdata, "org.freedesktop.login1.manage",
+                                   SESSION_OP_TERMINATE, error);
 }
 
 static int method_session_kill(sd_bus_message *m, void *userdata,
                                sd_bus_error *error)
 {
-    struct dbus_context *ctx = userdata;
-    const char *whom;
-    int32_t signo;
-    dl_session *session;
-    dl_process_identity leader;
+    const char *whom = NULL;
+    int32_t signo = 0;
     int r = sd_bus_message_read(m, "si", &whom, &signo);
     if (r < 0) return r;
     if (!whom || (strcmp(whom, "leader") != 0 && strcmp(whom, "") != 0 &&
@@ -608,41 +748,20 @@ static int method_session_kill(sd_bus_message *m, void *userdata,
     if (strcmp(whom, "all") == 0 || strcmp(whom, "") == 0)
         return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.NotSupported",
                                       "Whole-session signaling requires cgroup process tracking");
-    r = session_from_message(m, ctx, &session);
-    if (r < 0)
-        return sd_bus_error_set_const(error, "org.freedesktop.login1.NoSuchSession",
-                                      "Session no longer exists");
-    r = authorize_session_owner(m, session, error);
-    if (r < 0) return r;
-    leader = dl_session_leader(session);
-    r = dl_linux_process_signal(&leader, signo);
-    if (r == -ENOTSUP)
-        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.NotSupported",
-                                      "Safe process signaling requires pidfd support");
-    if (r < 0)
-        return sd_bus_error_setf(error, "org.freedesktop.login1.OperationFailed",
-                                 "Unable to signal session leader: %s", strerror(-r));
-    return sd_bus_reply_method_return(m, "");
+    return authorize_session_async(m, userdata, "org.freedesktop.login1.manage",
+                                   SESSION_OP_KILL_LEADER, error);
 }
 
 static int method_session_lock(sd_bus_message *m, void *userdata,
                                sd_bus_error *error)
 {
-    struct dbus_context *ctx = userdata;
-    dl_session *session;
-    const char *path = sd_bus_message_get_path(m);
     const char *member = sd_bus_message_get_member(m);
-    int r = session_from_message(m, ctx, &session);
-    if (r < 0)
-        return sd_bus_error_set_const(error, "org.freedesktop.login1.NoSuchSession",
-                                      "Session no longer exists");
-    r = authorize_session_owner(m, session, error);
-    if (r < 0) return r;
-    if (!path || !member) return -EINVAL;
-    r = sd_bus_emit_signal(ctx->bus, path, "org.freedesktop.login1.Session",
-                           member, "");
-    if (r < 0) return r;
-    return sd_bus_reply_method_return(m, "");
+    enum session_operation operation;
+    if (!member) return -EINVAL;
+    operation = strcmp(member, "Unlock") == 0 ?
+                SESSION_OP_UNLOCK : SESSION_OP_LOCK;
+    return authorize_session_async(m, userdata,
+        "org.freedesktop.login1.lock-sessions", operation, error);
 }
 
 static const sd_bus_vtable session_vtable[] = {
@@ -1029,6 +1148,7 @@ void dl_dbus_close(dl_dbus *dbus)
     struct dbus_context *ctx = NULL;
     if (!dbus) return;
     if (dbus->manager_slot) ctx = sd_bus_slot_get_userdata(dbus->manager_slot);
+    pending_authorizations_cancel(ctx);
     sd_bus_slot_unref(dbus->seat_slot);
     sd_bus_slot_unref(dbus->user_slot);
     sd_bus_slot_unref(dbus->session_slot);
