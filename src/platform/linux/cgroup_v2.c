@@ -298,7 +298,6 @@ int dl_linux_cgroup_v2_session_create(
 
     session->parent_fd = parent_copy;
     session->fd = child_fd;
-                   parent->path, session->name);
     parent_copy = -1;
     child_fd = -1;
     result = 0;
@@ -365,7 +364,6 @@ int dl_linux_cgroup_v2_session_open(
     }
     session->parent_fd = parent_copy;
     session->fd = child_fd;
-                   parent->path, session->name);
     return 0;
 }
 
