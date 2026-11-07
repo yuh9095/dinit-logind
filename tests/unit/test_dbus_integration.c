@@ -204,17 +204,8 @@ int main(void)
     }
     stage = 2;
     if (open_client(&client, address) < 0) goto finish;
-    r = sd_bus_add_object_vtable(client, &polkit_slot,
-        "/org/freedesktop/PolicyKit1/Authority",
-        "org.freedesktop.PolicyKit1.Authority", fake_polkit_vtable, NULL);
-    if (r < 0) goto finish;
-    r = sd_bus_request_name(client, "org.freedesktop.PolicyKit1", 0);
-    if (r < 0) goto finish;
     /* The authority uses its own connection so it can answer while the test
      * client is synchronously waiting for login1 method replies. */
-    sd_bus_slot_unref(polkit_slot);
-    polkit_slot = NULL;
-    sd_bus_release_name(client, "org.freedesktop.PolicyKit1");
     if (open_client(&authority.bus, address) < 0) goto finish;
     r = sd_bus_add_object_vtable(authority.bus, &polkit_slot,
         "/org/freedesktop/PolicyKit1/Authority",
@@ -564,7 +555,6 @@ finish:
     sd_bus_unref(authority.bus);
     sd_bus_message_unref(reply);
     sd_bus_error_free(&error);
-    sd_bus_slot_unref(polkit_slot);
     sd_bus_slot_unref(changed_slot);
     sd_bus_slot_unref(lock_slot);
     sd_bus_slot_unref(unlock_slot);
