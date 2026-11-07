@@ -3,6 +3,7 @@
  */
 #define _GNU_SOURCE
 #include "pam_session.h"
+#include "cgroup_v2.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -21,6 +22,8 @@ struct dl_pam_session {
     int socket_fd;
     bool closed;
     dl_linux_peer_credentials peer;
+    dl_linux_cgroup_v2_session cgroup_session;
+    bool has_cgroup;
 };
 
 dl_result dl_pam_session_begin(dl_manager *manager, int socket_fd,
@@ -38,6 +41,8 @@ dl_result dl_pam_session_begin(dl_manager *manager, int socket_fd,
     session = calloc(1, sizeof(*session));
     if (session == NULL) return DL_ERR_NOMEM;
     session->socket_fd = -1;
+    session->cgroup_session.parent_fd = -1;
+    session->cgroup_session.fd = -1;
 
     session->socket_fd = fcntl(socket_fd, F_DUPFD_CLOEXEC, 0);
     if (session->socket_fd < 0) {
@@ -62,6 +67,16 @@ dl_result dl_pam_session_begin(dl_manager *manager, int socket_fd,
     }
 
     session->manager = manager;
+    {
+        dl_linux_cgroup_v2 parent = {-1, {0}};
+        if (dl_linux_cgroup_v2_open_current(&parent) == 0) {
+            if (dl_linux_cgroup_v2_session_create(
+                    &parent, dl_session_id(session->core_session),
+                    &session->peer.process, &session->cgroup_session) == 0)
+                session->has_cgroup = true;
+            dl_linux_cgroup_v2_close(&parent);
+        }
+    }
     *out_session = session;
     return DL_OK;
 }
@@ -105,6 +120,11 @@ dl_result dl_pam_session_close(dl_pam_session *session)
     if (session->core_session != NULL) {
         result = dl_session_close(session->manager,
                                   dl_session_id(session->core_session));
+    }
+    if (session->has_cgroup) {
+        if (dl_linux_cgroup_v2_session_close(&session->cgroup_session) != 0)
+            dl_linux_cgroup_v2_session_release(&session->cgroup_session);
+        session->has_cgroup = false;
     }
     if (session->socket_fd >= 0) {
         (void)close(session->socket_fd);

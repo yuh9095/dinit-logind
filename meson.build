@@ -36,7 +36,7 @@ dbus_lib = static_library(
   'src/dbus/dbus.c',
   include_directories: include_directories('src/core', 'src/dbus', 'src/platform/linux'),
   dependencies: libsystemd_dep,
-  link_with: [core_lib, linux_identity_lib],
+  link_with: [core_lib, linux_identity_lib, linux_cgroup_v2_lib],
   install: false,
 )
 
@@ -48,7 +48,7 @@ dbus_test_lib = static_library(
   c_args: ['-DDL_POLKIT_AUTH_TIMEOUT_USEC=100000'],
   include_directories: include_directories('src/core', 'src/dbus', 'src/platform/linux'),
   dependencies: libsystemd_dep,
-  link_with: [core_lib, linux_identity_lib],
+  link_with: [core_lib, linux_identity_lib, linux_cgroup_v2_lib],
   install: false,
 )
 
@@ -64,7 +64,7 @@ linux_pam_session_lib = static_library(
   'dinit-logind-linux-pam-session',
   'src/platform/linux/pam_session.c',
   include_directories: include_directories('src/core', 'src/platform/linux'),
-  link_with: [core_lib, linux_peer_credentials_lib],
+  link_with: [core_lib, linux_peer_credentials_lib, linux_cgroup_v2_lib],
   install: false,
 )
 

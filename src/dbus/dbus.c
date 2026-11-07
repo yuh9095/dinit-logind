@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #include "dbus.h"
 #include "../platform/linux/process_identity.h"
+#include "../platform/linux/cgroup_v2.h"
 #include <signal.h>
 #include <errno.h>
 #include <pwd.h>
@@ -24,6 +25,7 @@ enum session_operation {
     SESSION_OP_ACTIVATE,
     SESSION_OP_TERMINATE,
     SESSION_OP_KILL_LEADER,
+    SESSION_OP_KILL_ALL,
     SESSION_OP_LOCK,
     SESSION_OP_UNLOCK
 };
@@ -117,6 +119,27 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
         r = dl_linux_process_signal(&leader, pending->signal_number);
         break;
     }
+    case SESSION_OP_KILL_ALL: {
+        dl_linux_cgroup_v2 parent = {-1, {0}};
+        dl_linux_cgroup_v2_session cgroup_session = {-1, -1, {0}, {0}};
+        dl_process_identity leader = dl_session_leader(session);
+        if (pending->signal_number != SIGKILL) {
+            r = -ENOTSUP;
+            break;
+        }
+        r = dl_linux_cgroup_v2_open_current(&parent);
+        if (r == 0)
+            r = dl_linux_cgroup_v2_session_open(
+                &parent, pending->session_id, &leader, &cgroup_session);
+        if (r == 0)
+            r = dl_linux_cgroup_v2_session_kill_all(&cgroup_session);
+        if (cgroup_session.fd >= 0)
+            dl_linux_cgroup_v2_session_release(&cgroup_session);
+        dl_linux_cgroup_v2_close(&parent);
+        if (r == -ENOENT || r == -ENODEV || r == -EACCES || r == -EPERM)
+            r = -ENOTSUP;
+        break;
+    }
     case SESSION_OP_LOCK:
     case SESSION_OP_UNLOCK:
         member = pending->operation == SESSION_OP_LOCK ? "Lock" : "Unlock";
@@ -129,7 +152,7 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
         sd_bus_error_set_const(&error,
             r == -ENOTSUP ? "org.freedesktop.DBus.Error.NotSupported" :
                             "org.freedesktop.login1.OperationFailed",
-            r == -ENOTSUP ? "Safe process signaling requires pidfd support" :
+            r == -ENOTSUP ? "Safe session signaling requires cgroup v2 cgroup.kill or pidfd support" :
                             "The authorized session operation failed");
         (void)sd_bus_reply_method_error(pending->request, &error);
     } else {
@@ -749,8 +772,8 @@ static int method_session_kill(sd_bus_message *m, void *userdata,
         return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.InvalidArgs",
                                       "Invalid signal number");
     if (strcmp(whom, "all") == 0 || strcmp(whom, "") == 0)
-        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.NotSupported",
-                                      "Whole-session signaling requires cgroup process tracking");
+        return authorize_session_async(m, userdata,
+            "org.freedesktop.login1.manage", SESSION_OP_KILL_ALL, signo, error);
     return authorize_session_async(m, userdata, "org.freedesktop.login1.manage",
                                    SESSION_OP_KILL_LEADER, signo, error);
 }

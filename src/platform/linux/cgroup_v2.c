@@ -239,6 +239,7 @@ int dl_linux_cgroup_v2_session_create(
         session->parent_fd = -1;
         session->fd = -1;
         session->name[0] = '\0';
+        session->path[0] = '\0';
     }
     if (parent == NULL || parent->fd < 0 || !valid_session_id(session_id) ||
         leader == NULL || leader->pid == 0 ||
