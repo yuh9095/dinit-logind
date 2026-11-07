@@ -507,7 +507,7 @@ int dl_linux_cgroup_v2_session_signal_all(
     char *line, *saveptr = NULL;
     int r;
     if (session == NULL || session->fd < 0 || signal_number <= 0 ||
-        signal_number >= NSIG || signal_number == SIGKILL)
+        signal_number == SIGKILL)
         return -EINVAL;
     r = cgroup_v2_read_procs(session, buffer, sizeof(buffer));
     if (r < 0) return r;
