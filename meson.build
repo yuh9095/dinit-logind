@@ -23,6 +23,14 @@ linux_identity_lib = static_library(
   install: false,
 )
 
+linux_cgroup_v2_lib = static_library(
+  'dinit-logind-linux-cgroup-v2',
+  'src/platform/linux/cgroup_v2.c',
+  include_directories: include_directories('src/core', 'src/platform/linux'),
+  link_with: linux_identity_lib,
+  install: false,
+)
+
 dbus_lib = static_library(
   'dinit-logind-dbus',
   'src/dbus/dbus.c',
