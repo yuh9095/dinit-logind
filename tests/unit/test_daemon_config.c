@@ -29,13 +29,14 @@ static void test_root_owned_config_policy(void)
     dl_daemon_config config;
     assert(fd >= 0);
     assert(fchmod(fd, 0600) == 0);
-    write_all(fd, "allowed_peer_uid = 0\n");
+    write_all(fd, "allowed_peer_uid = 0\nsession_terminate_timeout_sec = 37\n");
     assert(close(fd) == 0);
 
     dl_daemon_config_defaults(&config);
     if (geteuid() == 0) {
         assert(dl_daemon_config_load(path, &config) == 0);
         assert(config.allowed_peer_uid == 0);
+        assert(config.session_terminate_timeout_sec == 37);
     } else {
         errno = 0;
         assert(dl_daemon_config_load(path, &config) == -1);
@@ -66,10 +67,39 @@ static void test_symlink_rejected(void)
     assert(unlink(target) == 0);
 }
 
+
+static void test_terminate_timeout_defaults(void)
+{
+    dl_daemon_config config;
+    dl_daemon_config_defaults(&config);
+    assert(config.allowed_peer_uid == 0);
+    assert(config.session_terminate_timeout_sec == 90);
+}
+
+static void test_invalid_terminate_timeout_rejected(void)
+{
+    char path[] = "/tmp/dinit-logind-timeout-XXXXXX";
+    int fd = mkstemp(path);
+    dl_daemon_config config;
+    assert(fd >= 0);
+    assert(fchmod(fd, 0600) == 0);
+    write_all(fd, "session_terminate_timeout_sec = 0\\n");
+    assert(close(fd) == 0);
+    dl_daemon_config_defaults(&config);
+    if (geteuid() == 0) {
+        errno = 0;
+        assert(dl_daemon_config_load(path, &config) == -1);
+        assert(errno == EINVAL);
+    }
+    assert(unlink(path) == 0);
+}
+
 int main(void)
 {
     test_root_owned_config_policy();
     test_symlink_rejected();
+    test_terminate_timeout_defaults();
+    test_invalid_terminate_timeout_rejected();
     puts("daemon configuration tests: ok");
     return 0;
 }
