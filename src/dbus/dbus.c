@@ -16,6 +16,10 @@
 #define DL_LOGIN1_PATH "/org/freedesktop/login1"
 #define DL_LOGIN1_IFACE "org.freedesktop.login1.Manager"
 
+#ifndef DL_POLKIT_AUTH_TIMEOUT_USEC
+#define DL_POLKIT_AUTH_TIMEOUT_USEC (30ULL * 1000ULL * 1000ULL)
+#endif
+
 enum session_operation {
     SESSION_OP_ACTIVATE,
     SESSION_OP_TERMINATE,
@@ -185,7 +189,7 @@ static int authorize_session_async(sd_bus_message *m, struct dbus_context *ctx,
     if (r >= 0) r = sd_bus_message_append(call, "us", 1u, "");
     if (r >= 0) r = sd_bus_call_async(ctx->bus, &pending->slot, call,
                                       session_authorization_reply, pending,
-                                      30ULL * 1000ULL * 1000ULL);
+                                      DL_POLKIT_AUTH_TIMEOUT_USEC);
     sd_bus_message_unref(call);
     if (r < 0) {
         pending_authorization_free(pending);

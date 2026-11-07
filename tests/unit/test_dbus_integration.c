@@ -41,6 +41,7 @@ static int unlock_signal_count;
 
 static atomic_int fake_polkit_allow = 1;
 static atomic_int fake_polkit_challenge = 0;
+static atomic_int fake_polkit_suppress_reply = 0;
 static atomic_uint fake_polkit_calls;
 
 static int fake_polkit_check(sd_bus_message *message, void *userdata,
@@ -390,6 +391,16 @@ int main(void)
     sd_bus_message_unref(reply);
     reply = NULL;
     atomic_store(&fake_polkit_challenge, 0);
+    atomic_store(&fake_polkit_suppress_reply, 1);
+    r = sd_bus_call_method(client, LOGIN1_NAME, object_path, SESSION_IFACE,
+                           "Activate", &error, &reply, "");
+    if (r >= 0 || !sd_bus_error_has_name(&error,
+            "org.freedesktop.DBus.Error.AccessDenied"))
+        goto stop_server;
+    sd_bus_error_free(&error);
+    sd_bus_message_unref(reply);
+    reply = NULL;
+    atomic_store(&fake_polkit_suppress_reply, 0);
     atomic_store(&fake_polkit_allow, 1);
     r = sd_bus_call_method(client, LOGIN1_NAME, object_path, SESSION_IFACE,
                            "Activate", &error, &reply, "");

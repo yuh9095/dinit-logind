@@ -32,6 +32,18 @@ dbus_lib = static_library(
   install: false,
 )
 
+# The integration test uses a short Polkit deadline to exercise timeout
+# handling without making the normal test suite wait for the production limit.
+dbus_test_lib = static_library(
+  'dinit-logind-dbus-test',
+  'src/dbus/dbus.c',
+  c_args: ['-DDL_POLKIT_AUTH_TIMEOUT_USEC=100000'],
+  include_directories: include_directories('src/core', 'src/dbus', 'src/platform/linux'),
+  dependencies: libsystemd_dep,
+  link_with: [core_lib, linux_identity_lib],
+  install: false,
+)
+
 linux_peer_credentials_lib = static_library(
   'dinit-logind-linux-peer-credentials',
   'src/platform/linux/peer_credentials.c',
