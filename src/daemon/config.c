@@ -73,7 +73,7 @@ int dl_daemon_config_load(const char *path, dl_daemon_config *config)
         }
         errno = 0;
         parsed = strtoul(value, &end, 10);
-        if (errno != 0 || *trim(end) != '\0' || parsed > UINT32_MAX) {
+        if (errno != 0 || *trim(end) != '\0' || parsed > UINT32_MAX || parsed != 0) {
             errno = EINVAL;
             goto out;
         }

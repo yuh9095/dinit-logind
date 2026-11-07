@@ -20,7 +20,7 @@ removes the socket only if its device/inode still match the socket it created.
 
 ## Configuration
 
-The only supported setting is `allowed_peer_uid`, defaulting to 0. The
+The only supported setting is `allowed_peer_uid = 0`. Non-root peer UIDs are rejected: the PAM ingress is a privileged session-creation interface and must only trust root-owned PAM clients. The
 configuration file must be regular, root-owned, and not group/world-writable;
 it is opened with O_NOFOLLOW. Unknown and duplicate settings are errors.
 Do not allow untrusted users to control this value.

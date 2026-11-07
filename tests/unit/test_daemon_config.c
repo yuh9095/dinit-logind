@@ -29,13 +29,13 @@ static void test_root_owned_config_policy(void)
     dl_daemon_config config;
     assert(fd >= 0);
     assert(fchmod(fd, 0600) == 0);
-    write_all(fd, "allowed_peer_uid = 123\n");
+    write_all(fd, "allowed_peer_uid = 0\n");
     assert(close(fd) == 0);
 
     dl_daemon_config_defaults(&config);
     if (geteuid() == 0) {
         assert(dl_daemon_config_load(path, &config) == 0);
-        assert(config.allowed_peer_uid == 123);
+        assert(config.allowed_peer_uid == 0);
     } else {
         errno = 0;
         assert(dl_daemon_config_load(path, &config) == -1);
