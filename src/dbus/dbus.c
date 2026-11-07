@@ -121,7 +121,7 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
     }
     case SESSION_OP_KILL_ALL: {
         dl_linux_cgroup_v2 parent = {-1, {0}};
-        dl_linux_cgroup_v2_session cgroup_session = {-1, -1, {0}, {0}};
+        dl_linux_cgroup_v2_session cgroup_session = {-1, -1, {0}};
         dl_process_identity leader = dl_session_leader(session);
         if (pending->signal_number != SIGKILL) {
             r = -ENOTSUP;

@@ -13,7 +13,6 @@ extern "C" {
 
 typedef struct {
     int fd;
-    char path[4096];
 } dl_linux_cgroup_v2;
 
 typedef struct {

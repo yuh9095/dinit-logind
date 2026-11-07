@@ -239,7 +239,6 @@ int dl_linux_cgroup_v2_session_create(
         session->parent_fd = -1;
         session->fd = -1;
         session->name[0] = '\0';
-        session->path[0] = '\0';
     }
     if (parent == NULL || parent->fd < 0 || !valid_session_id(session_id) ||
         leader == NULL || leader->pid == 0 ||
@@ -299,7 +298,6 @@ int dl_linux_cgroup_v2_session_create(
 
     session->parent_fd = parent_copy;
     session->fd = child_fd;
-    (void)snprintf(session->path, sizeof(session->path), "%s/%s",
                    parent->path, session->name);
     parent_copy = -1;
     child_fd = -1;
@@ -315,7 +313,6 @@ out:
         session->parent_fd = -1;
         session->fd = -1;
         session->name[0] = '\0';
-        session->path[0] = '\0';
     }
     return result;
 #else
@@ -326,7 +323,6 @@ out:
         session->parent_fd = -1;
         session->fd = -1;
         session->name[0] = '\0';
-        session->path[0] = '\0';
     }
     return -ENOTSUP;
 #endif
@@ -342,7 +338,6 @@ int dl_linux_cgroup_v2_session_open(
         session->parent_fd = -1;
         session->fd = -1;
         session->name[0] = '\0';
-        session->path[0] = '\0';
     }
     if (parent == NULL || parent->fd < 0 || session == NULL)
         return -EINVAL;
@@ -370,7 +365,6 @@ int dl_linux_cgroup_v2_session_open(
     }
     session->parent_fd = parent_copy;
     session->fd = child_fd;
-    (void)snprintf(session->path, sizeof(session->path), "%s/%s",
                    parent->path, session->name);
     return 0;
 }
@@ -383,7 +377,6 @@ void dl_linux_cgroup_v2_session_release(dl_linux_cgroup_v2_session *session)
     session->fd = -1;
     session->parent_fd = -1;
     session->name[0] = '\0';
-    session->path[0] = '\0';
 }
 
 int dl_linux_cgroup_v2_session_kill_all(
@@ -418,6 +411,5 @@ int dl_linux_cgroup_v2_session_close(dl_linux_cgroup_v2_session *session)
     session->fd = -1;
     session->parent_fd = -1;
     session->name[0] = '\0';
-    session->path[0] = '\0';
     return 0;
 }
