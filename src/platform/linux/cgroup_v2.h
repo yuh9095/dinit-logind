@@ -20,6 +20,7 @@ typedef struct {
     int parent_fd;
     int fd;
     char name[96];
+    char path[4096];
 } dl_linux_cgroup_v2_session;
 
 /* Parse the unified 0:: entry from /proc/self/cgroup. Root and unsafe paths
@@ -38,6 +39,14 @@ void dl_linux_cgroup_v2_close(dl_linux_cgroup_v2 *cgroup);
 int dl_linux_cgroup_v2_session_create(
     const dl_linux_cgroup_v2 *parent, const char *session_id,
     const dl_process_identity *leader, dl_linux_cgroup_v2_session *session);
+
+/* Open an existing session cgroup by its generated ID/leader-derived name. */
+int dl_linux_cgroup_v2_session_open(
+    const dl_linux_cgroup_v2 *parent, const char *session_id,
+    const dl_process_identity *leader, dl_linux_cgroup_v2_session *session);
+
+/* Close handles without removing the cgroup (used when still populated). */
+void dl_linux_cgroup_v2_session_release(dl_linux_cgroup_v2_session *session);
 
 /* cgroup.kill is required; missing support returns -ENOTSUP. */
 int dl_linux_cgroup_v2_session_kill_all(

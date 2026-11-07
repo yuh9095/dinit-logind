@@ -200,6 +200,22 @@ static bool valid_session_id(const char *session_id)
     return true;
 }
 
+
+static int make_session_name(const char *session_id,
+                             const dl_process_identity *leader,
+                             char *name, size_t name_size)
+{
+    int length;
+    if (!valid_session_id(session_id) || leader == NULL ||
+        leader->pid == 0 || leader->pid_namespace_inode == 0)
+        return -EINVAL;
+    length = snprintf(name, name_size, "login-%s-%u-%llu", session_id,
+                      leader->pid,
+                      (unsigned long long)leader->process_start_time);
+    return length < 0 ? -EINVAL :
+           (size_t)length >= name_size ? -ENAMETOOLONG : 0;
+}
+
 static bool same_process(const dl_process_identity *a,
                          const dl_process_identity *b)
 {
@@ -242,11 +258,9 @@ int dl_linux_cgroup_v2_session_create(
     parent_copy = fcntl(parent->fd, F_DUPFD_CLOEXEC, 0);
     if (parent_copy < 0) { result = -errno; goto out; }
 
-    if (snprintf(session->name, sizeof(session->name), "login-%s",
-                 session_id) >= (int)sizeof(session->name)) {
-        result = -ENAMETOOLONG;
-        goto out;
-    }
+    result = make_session_name(session_id, leader, session->name,
+                               sizeof(session->name));
+    if (result != 0) goto out;
     if (mkdirat(parent->fd, session->name, 0755) != 0) {
         result = -errno;
         goto out;
@@ -284,6 +298,8 @@ int dl_linux_cgroup_v2_session_create(
 
     session->parent_fd = parent_copy;
     session->fd = child_fd;
+    (void)snprintf(session->path, sizeof(session->path), "%s/%s",
+                   parent->path, session->name);
     parent_copy = -1;
     child_fd = -1;
     result = 0;
@@ -298,6 +314,7 @@ out:
         session->parent_fd = -1;
         session->fd = -1;
         session->name[0] = '\0';
+        session->path[0] = '\0';
     }
     return result;
 #else
@@ -308,9 +325,64 @@ out:
         session->parent_fd = -1;
         session->fd = -1;
         session->name[0] = '\0';
+        session->path[0] = '\0';
     }
     return -ENOTSUP;
 #endif
+}
+
+
+int dl_linux_cgroup_v2_session_open(
+    const dl_linux_cgroup_v2 *parent, const char *session_id,
+    const dl_process_identity *leader, dl_linux_cgroup_v2_session *session)
+{
+    int result, parent_copy = -1, child_fd = -1;
+    if (session != NULL) {
+        session->parent_fd = -1;
+        session->fd = -1;
+        session->name[0] = '\0';
+        session->path[0] = '\0';
+    }
+    if (parent == NULL || parent->fd < 0 || session == NULL)
+        return -EINVAL;
+    result = verify_cgroup2_fd(parent->fd);
+    if (result != 0) return result;
+    result = make_session_name(session_id, leader, session->name,
+                               sizeof(session->name));
+    if (result != 0) return result;
+    parent_copy = fcntl(parent->fd, F_DUPFD_CLOEXEC, 0);
+    if (parent_copy < 0) return -errno;
+    child_fd = openat(parent->fd, session->name,
+                      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (child_fd < 0) {
+        result = -errno;
+        (void)close(parent_copy);
+        session->name[0] = '\0';
+        return result;
+    }
+    result = verify_cgroup2_fd(child_fd);
+    if (result != 0) {
+        (void)close(child_fd);
+        (void)close(parent_copy);
+        session->name[0] = '\0';
+        return result;
+    }
+    session->parent_fd = parent_copy;
+    session->fd = child_fd;
+    (void)snprintf(session->path, sizeof(session->path), "%s/%s",
+                   parent->path, session->name);
+    return 0;
+}
+
+void dl_linux_cgroup_v2_session_release(dl_linux_cgroup_v2_session *session)
+{
+    if (session == NULL) return;
+    if (session->fd >= 0) (void)close(session->fd);
+    if (session->parent_fd >= 0) (void)close(session->parent_fd);
+    session->fd = -1;
+    session->parent_fd = -1;
+    session->name[0] = '\0';
+    session->path[0] = '\0';
 }
 
 int dl_linux_cgroup_v2_session_kill_all(
@@ -345,5 +417,6 @@ int dl_linux_cgroup_v2_session_close(dl_linux_cgroup_v2_session *session)
     session->fd = -1;
     session->parent_fd = -1;
     session->name[0] = '\0';
+    session->path[0] = '\0';
     return 0;
 }
