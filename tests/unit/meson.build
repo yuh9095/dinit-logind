@@ -47,3 +47,13 @@ pam_ingress_test = executable(
 )
 
 test('PAM ingress protocol and lifecycle', pam_ingress_test)
+
+daemon_config_test = executable(
+  'test-daemon-config',
+  'test_daemon_config.c',
+  include_directories: include_directories('../../src/daemon'),
+  link_with: daemon_config_lib,
+  install: false,
+)
+
+test('daemon configuration ownership and parsing', daemon_config_test)

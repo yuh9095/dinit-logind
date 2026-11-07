@@ -46,6 +46,23 @@ linux_pam_ingress_lib = static_library(
   install: false,
 )
 
+daemon_config_lib = static_library(
+  'dinit-logind-daemon-config',
+  'src/daemon/config.c',
+  include_directories: include_directories('src/daemon'),
+  install: false,
+)
+
+daemon_exe = executable(
+  'dinit-logind',
+  'src/daemon/main.c',
+  'src/daemon/runtime_socket.c',
+  include_directories: include_directories('src/core', 'src/platform/linux', 'src/daemon'),
+  link_with: [core_lib, linux_identity_lib, linux_peer_credentials_lib, linux_pam_session_lib, linux_pam_ingress_lib, daemon_config_lib],
+  install: true,
+  install_dir: get_option('sbindir'),
+)
+
 if pam_dep.found()
   shared_module(
     'pam_dinit_logind',
@@ -58,3 +75,6 @@ if pam_dep.found()
 endif
 
 subdir('tests/unit')
+
+test('daemon version output', daemon_exe, args: ['--version'])
+test('daemon help output', daemon_exe, args: ['--help'])

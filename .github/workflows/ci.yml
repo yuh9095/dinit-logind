@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   meson-setup:
-    name: Meson project and PAM module validation
+    name: Meson project, daemon and PAM validation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,3 +24,7 @@ jobs:
         run: meson compile -C builddir
       - name: Run tests
         run: meson test -C builddir --print-errorlogs
+      - name: Check daemon CLI
+        run: |
+          builddir/dinit-logind --version
+          builddir/dinit-logind --help

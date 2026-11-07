@@ -1,0 +1,4 @@
+# dinit service description for dinit-logind
+type = process
+command = /usr/sbin/dinit-logind
+restart = true
