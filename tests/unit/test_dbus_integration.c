@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "../../src/dbus/dbus.h"
+#include "../../src/platform/linux/process_identity.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -151,9 +152,8 @@ int main(void)
     }
 
     spec.uid = (uint32_t)getuid();
-    spec.leader.pid = (uint32_t)getpid();
-    spec.leader.pid_namespace_inode = 1;
-    spec.leader.process_start_time = 1;
+    if (dl_linux_process_identity_read((uint32_t)getpid(), &spec.leader) != DL_OK)
+        goto stop_server;
     spec.seat = "seat0";
     spec.tty = "tty-test";
     spec.service = "test-login";
@@ -179,6 +179,26 @@ int main(void)
     reply = NULL;
 
     stage = 7;
+    r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
+                           "GetSessionByPID", &error, &reply, "u",
+                           (uint32_t)getpid());
+    if (r < 0 || sd_bus_message_read(reply, "o", &returned_path) < 0 ||
+        strcmp(returned_path, object_path) != 0)
+        goto stop_server;
+    sd_bus_message_unref(reply);
+    reply = NULL;
+
+    stage = 8;
+    r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
+                           "GetSessionByPID", &error, &reply, "u", 0);
+    if (r < 0 || sd_bus_message_read(reply, "o", &returned_path) < 0 ||
+        strcmp(returned_path, object_path) != 0)
+        goto stop_server;
+    sd_bus_message_unref(reply);
+    reply = NULL;
+
+
+    stage = 7;
     r = sd_bus_get_property_trivial(client, LOGIN1_NAME, object_path,
         SESSION_IFACE, "Active", &error, 'b', &active);
     if (r < 0 || active != 0) goto stop_server;
@@ -201,6 +221,37 @@ int main(void)
         goto stop_server;
     sd_bus_message_unref(reply);
     reply = NULL;
+
+    stage = 10;
+    r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
+                           "GetUserByPID", &error, &reply, "u",
+                           (uint32_t)getpid());
+    if (r < 0 || sd_bus_message_read(reply, "o", &returned_path) < 0 ||
+        strcmp(returned_path, user_path) != 0)
+        goto stop_server;
+    sd_bus_message_unref(reply);
+    reply = NULL;
+
+    stage = 11;
+    r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
+                           "GetSessionByPID", &error, &reply, "u", UINT32_MAX);
+    if (r >= 0 || !sd_bus_error_has_name(&error,
+            "org.freedesktop.login1.NoSessionForPID"))
+        goto stop_server;
+    sd_bus_error_free(&error);
+    sd_bus_message_unref(reply);
+    reply = NULL;
+
+    stage = 12;
+    r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
+                           "GetUserByPID", &error, &reply, "u", UINT32_MAX);
+    if (r >= 0 || !sd_bus_error_has_name(&error,
+            "org.freedesktop.login1.NoUserForPID"))
+        goto stop_server;
+    sd_bus_error_free(&error);
+    sd_bus_message_unref(reply);
+    reply = NULL;
+
     stage = 10;
     r = sd_bus_call_method(client, LOGIN1_NAME, user_path,
         "org.freedesktop.DBus.Properties", "GetAll", &error, &reply,

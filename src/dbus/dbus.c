@@ -3,6 +3,7 @@
  */
 #define _GNU_SOURCE
 #include "dbus.h"
+#include "../platform/linux/process_identity.h"
 #include <errno.h>
 #include <pwd.h>
 #include <stdio.h>
@@ -76,6 +77,88 @@ static int method_get_session(sd_bus_message *m, void *userdata,
     if (make_object_path("session", id, path, sizeof(path)) < 0)
         return sd_bus_error_set_const(ret_error,
             "org.freedesktop.DBus.Error.InvalidArgs", "Invalid session identifier");
+    return sd_bus_reply_method_return(m, "o", path);
+}
+
+
+static int identity_for_pid_argument(sd_bus_message *m, uint32_t requested_pid,
+                                     dl_process_identity *identity)
+{
+    uint32_t pid = requested_pid;
+    int r;
+
+    if (pid == 0) {
+        sd_bus_creds *creds = NULL;
+        pid_t sender_pid = 0;
+
+        r = sd_bus_query_sender_creds(m, SD_BUS_CREDS_PID, &creds);
+        if (r < 0) return r;
+        r = sd_bus_creds_get_pid(creds, &sender_pid);
+        sd_bus_creds_unref(creds);
+        if (r < 0) return r;
+        if (sender_pid <= 0) return -EINVAL;
+        pid = (uint32_t)sender_pid;
+    }
+
+    return dl_linux_process_identity_read(pid, identity) == DL_OK ? 0 : -ESRCH;
+}
+
+static int method_get_session_by_pid(sd_bus_message *m, void *userdata,
+                                     sd_bus_error *ret_error)
+{
+    struct dbus_context *ctx = userdata;
+    uint32_t pid;
+    dl_process_identity identity;
+    dl_session *session;
+    char path[256];
+    int r;
+
+    if (sd_bus_message_read(m, "u", &pid) < 0) return -EINVAL;
+    r = identity_for_pid_argument(m, pid, &identity);
+    if (r < 0)
+        return sd_bus_error_setf(ret_error,
+            "org.freedesktop.login1.NoSessionForPID",
+            "PID %u does not belong to a tracked session", pid);
+    session = dl_session_find_by_identity(ctx->manager, &identity);
+    if (session == NULL)
+        return sd_bus_error_setf(ret_error,
+            "org.freedesktop.login1.NoSessionForPID",
+            "PID %u does not belong to a tracked session", pid);
+    if (make_object_path("session", dl_session_id(session), path, sizeof(path)) < 0)
+        return sd_bus_error_set_const(ret_error,
+            "org.freedesktop.DBus.Error.InvalidArgs", "Invalid session identifier");
+    return sd_bus_reply_method_return(m, "o", path);
+}
+
+static int method_get_user_by_pid(sd_bus_message *m, void *userdata,
+                                  sd_bus_error *ret_error)
+{
+    struct dbus_context *ctx = userdata;
+    uint32_t pid, uid;
+    dl_process_identity identity;
+    dl_session *session;
+    char path[256];
+    int r;
+
+    if (sd_bus_message_read(m, "u", &pid) < 0) return -EINVAL;
+    r = identity_for_pid_argument(m, pid, &identity);
+    if (r < 0)
+        return sd_bus_error_setf(ret_error,
+            "org.freedesktop.login1.NoUserForPID",
+            "PID %u does not belong to a tracked user session", pid);
+    session = dl_session_find_by_identity(ctx->manager, &identity);
+    if (session == NULL)
+        return sd_bus_error_setf(ret_error,
+            "org.freedesktop.login1.NoUserForPID",
+            "PID %u does not belong to a tracked user session", pid);
+    uid = dl_session_uid(session);
+    if (dl_user_find(ctx->manager, uid) == NULL)
+        return sd_bus_error_setf(ret_error,
+            "org.freedesktop.login1.NoUserForPID",
+            "PID %u does not belong to a tracked user session", pid);
+    if (path_for_user(uid, path, sizeof(path)) < 0)
+        return sd_bus_error_set_const(ret_error,
+            "org.freedesktop.DBus.Error.InvalidArgs", "Invalid user identifier");
     return sd_bus_reply_method_return(m, "o", path);
 }
 
@@ -544,7 +627,9 @@ static int fallback_object_find(sd_bus *bus, const char *path,
 static const sd_bus_vtable manager_vtable[] = {
     SD_BUS_VTABLE_START(0),
     SD_BUS_METHOD("GetSession", "s", "o", method_get_session, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("GetSessionByPID", "u", "o", method_get_session_by_pid, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("GetUser", "u", "o", method_get_user, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("GetUserByPID", "u", "o", method_get_user_by_pid, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("GetSeat", "s", "o", method_get_seat, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("ListSessions", "", "a(susso)", method_list_sessions, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("ListUsers", "", "a(uso)", method_list_users, SD_BUS_VTABLE_UNPRIVILEGED),
