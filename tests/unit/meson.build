@@ -17,3 +17,13 @@ process_identity_test = executable(
 )
 
 test('Linux process identity acquisition', process_identity_test)
+
+peer_credentials_test = executable(
+  'test-peer-credentials',
+  'test_peer_credentials.c',
+  include_directories: include_directories('../../src/core', '../../src/platform/linux'),
+  link_with: [core_lib, linux_identity_lib, linux_peer_credentials_lib],
+  install: false,
+)
+
+test('Linux Unix socket peer credentials', peer_credentials_test)

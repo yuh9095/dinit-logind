@@ -20,4 +20,12 @@ linux_identity_lib = static_library(
   install: false,
 )
 
+linux_peer_credentials_lib = static_library(
+  'dinit-logind-linux-peer-credentials',
+  'src/platform/linux/peer_credentials.c',
+  include_directories: include_directories('src/core', 'src/platform/linux'),
+  link_with: linux_identity_lib,
+  install: false,
+)
+
 subdir('tests/unit')

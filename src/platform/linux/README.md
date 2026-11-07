@@ -1,10 +1,16 @@
 # Linux platform adapter
 
-Linux-specific process identity acquisition lives here. The process identity
-reader uses procfs and the PID namespace handle; callers must supply a PID
-obtained from authenticated peer credentials. This layer does not decide
-session ownership or authorization.
+Linux-specific process identity and Unix socket peer credential acquisition
+lives here.
 
-The reader opens the process directory once, reads its stat start-time twice,
-and obtains the PID namespace inode from that process directory. It fails
-closed when procfs data is missing, inconsistent, or inaccessible.
+- `process_identity.c` reads the peer PID's PID-namespace inode and process
+  start time through a single opened procfs process directory. It rejects
+  missing, inaccessible, or inconsistent process state.
+- `peer_credentials.c` obtains PID, UID, and GID from kernel-provided
+  `SO_PEERCRED` on a connected Unix-domain socket, then binds that PID to the
+  procfs identity tuple.
+
+The caller must obtain the PID from the connected socket, not from client
+payload fields. These credentials identify the peer but do not grant
+authorization; PAM policy, socket access policy, and Polkit checks remain
+separate. If procfs identity cannot be verified, the helper fails closed.
