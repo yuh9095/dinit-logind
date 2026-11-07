@@ -174,7 +174,7 @@ int dl_linux_cgroup_v2_open_current(dl_linux_cgroup_v2 *cgroup)
 out:
     if (current_fd >= 0) (void)close(current_fd);
     if (root_fd >= 0) (void)close(root_fd);
-    if (result != 0) cgroup->path[0] = '\\0';
+    if (result != 0) cgroup->path[0] = '\0';
     return result;
 }
 
@@ -261,7 +261,7 @@ int dl_linux_cgroup_v2_session_create(
 
     procs_fd = openat(child_fd, "cgroup.procs", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
     if (procs_fd < 0) { result = -errno; goto out; }
-    if (snprintf(pid_text, sizeof(pid_text), "%u\\n", leader->pid) >=
+    if (snprintf(pid_text, sizeof(pid_text), "%u\n", leader->pid) >=
         (int)sizeof(pid_text)) {
         result = -EINVAL;
         goto out;
