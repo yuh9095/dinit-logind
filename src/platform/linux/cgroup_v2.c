@@ -571,9 +571,14 @@ static int cgroup_v2_signal_tree(int cgroup_fd, int signal_number,
         (void)close(duplicate_fd);
         return r;
     }
-    errno = 0;
-    while ((entry = readdir(directory)) != NULL) {
+    for (;;) {
         int child_fd;
+        errno = 0;
+        entry = readdir(directory);
+        if (entry == NULL) {
+            r = errno == 0 ? 0 : -errno;
+            break;
+        }
         if (strcmp(entry->d_name, ".") == 0 ||
             strcmp(entry->d_name, "..") == 0)
             continue;
@@ -582,20 +587,17 @@ static int cgroup_v2_signal_tree(int cgroup_fd, int signal_number,
         if (child_fd < 0) {
             if (errno == ENOTDIR) continue;
             r = -errno;
-            (void)closedir(directory);
-            return r;
+            break;
         }
         r = cgroup_v2_signal_tree(child_fd, signal_number,
                                   depth + 1, process_count);
         (void)close(child_fd);
-        if (r < 0) {
-            (void)closedir(directory);
-            return r;
-        }
-        errno = 0;
+        if (r < 0) break;
     }
-    if (errno != 0) r = -errno;
-    else r = 0;
+    if (r < 0) {
+        (void)closedir(directory);
+        return r;
+    }
     (void)closedir(directory);
     return r;
 }
