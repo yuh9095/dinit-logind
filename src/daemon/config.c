@@ -16,7 +16,10 @@
 
 void dl_daemon_config_defaults(dl_daemon_config *config)
 {
-    if (config != NULL) config->allowed_peer_uid = 0;
+    if (config != NULL) {
+        config->allowed_peer_uid = 0;
+        config->session_terminate_timeout_sec = 90;
+    }
 }
 
 static char *trim(char *value)
@@ -66,19 +69,34 @@ int dl_daemon_config_load(const char *path, dl_daemon_config *config)
         *equals = '\0';
         key = trim(entry);
         value = trim(equals + 1);
-        if (strcmp(key, "allowed_peer_uid") != 0 || seen != 0 ||
-            *value == '\0' || *value == '-') {
+        if (*value == '\0' || *value == '-') {
             errno = EINVAL;
             goto out;
         }
         errno = 0;
         parsed = strtoul(value, &end, 10);
-        if (errno != 0 || *trim(end) != '\0' || parsed > UINT32_MAX || parsed != 0) {
+        if (errno != 0 || *trim(end) != '\0' || parsed > UINT32_MAX) {
             errno = EINVAL;
             goto out;
         }
-        config->allowed_peer_uid = (uint32_t)parsed;
-        seen = 1;
+        if (strcmp(key, "allowed_peer_uid") == 0) {
+            if ((seen & 1u) != 0 || parsed != 0) {
+                errno = EINVAL;
+                goto out;
+            }
+            config->allowed_peer_uid = (uint32_t)parsed;
+            seen |= 1u;
+        } else if (strcmp(key, "session_terminate_timeout_sec") == 0) {
+            if ((seen & 2u) != 0 || parsed < 1 || parsed > 86400) {
+                errno = EINVAL;
+                goto out;
+            }
+            config->session_terminate_timeout_sec = (uint32_t)parsed;
+            seen |= 2u;
+        } else {
+            errno = EINVAL;
+            goto out;
+        }
     }
     if (ferror(file)) goto out;
     result = 0;
