@@ -158,13 +158,22 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
                                     &termination->deadline) != 0)
             r = -errno;
         if (r == 0) {
+            int signal_result;
             termination->deadline.tv_sec += DL_SESSION_TERMINATE_TIMEOUT_SEC;
             (void)snprintf(termination->session_id,
                            sizeof(termination->session_id), "%s",
                            pending->session_id);
-            r = dl_linux_cgroup_v2_session_signal_all(&cgroup_session, SIGTERM);
-        }
-        if (r == 0) {
+            signal_result = dl_linux_cgroup_v2_session_signal_all(
+                &cgroup_session, SIGTERM);
+            if (signal_result < 0) {
+                /* Signaling may have made partial progress. Keep the final
+                 * cgroup.kill scheduled even though the method reports error. */
+                fprintf(stderr,
+                    "dinit-logind: initial SIGTERM for session %s failed (%d); "
+                    "retaining deferred SIGKILL\n",
+                    pending->session_id, signal_result);
+                r = signal_result;
+            }
             termination->cgroup = cgroup_session;
             cgroup_session.fd = -1;
             cgroup_session.parent_fd = -1;
