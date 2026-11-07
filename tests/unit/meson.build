@@ -60,3 +60,18 @@ runtime_test = executable(
   install: false,
 )
 test('runtime directory and persistent linger', runtime_test)
+
+threads_dep = dependency('threads')
+dbus_run_session = find_program('dbus-run-session', required: true)
+
+dbus_integration_test = executable(
+  'test-dbus-integration',
+  'test_dbus_integration.c',
+  include_directories: include_directories('../../src/core', '../../src/dbus'),
+  dependencies: [libsystemd_dep, threads_dep],
+  link_with: [dbus_lib, core_lib],
+  install: false,
+)
+test('D-Bus login1 object lifecycle and properties',
+     dbus_run_session,
+     args: ['--', dbus_integration_test])

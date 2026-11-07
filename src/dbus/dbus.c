@@ -67,7 +67,8 @@ static int method_get_session(sd_bus_message *m, void *userdata,
     const char *id;
     char path[256];
     if (sd_bus_message_read(m, "s", &id) < 0) return -EINVAL;
-    if (!dl_session_find(ctx->manager, id))
+    if (!dl_session_find(ctx->manager, id) ||
+        dl_session_get_state(dl_session_find(ctx->manager, id)) == DL_SESSION_CLOSED)
         return sd_bus_error_setf(ret_error,
             "org.freedesktop.login1.NoSuchSession", "No session '%s'", id);
     if (make_object_path("session", id, path, sizeof(path)) < 0)
@@ -247,7 +248,8 @@ static int session_property(sd_bus *bus, const char *path, const char *interface
     int r;
     (void)bus; (void)interface;
     r = decode_component(path, DL_LOGIN1_PATH "/session/", id, sizeof(id));
-    if (r < 0 || !(session = dl_session_find(ctx->manager, id)))
+    if (r < 0 || !(session = dl_session_find(ctx->manager, id)) ||
+        dl_session_get_state(session) == DL_SESSION_CLOSED)
         return sd_bus_error_set_const(error, "org.freedesktop.login1.NoSuchSession",
                                       "Session no longer exists");
     uid = dl_session_uid(session);
@@ -353,13 +355,16 @@ static int user_property(sd_bus *bus, const char *path, const char *interface,
         strcmp(property, "IdleSinceHintMonotonic") == 0)
         return sd_bus_message_append(reply, "t", (uint64_t)0);
     if (strcmp(property, "RuntimePath") == 0 ||
-        strcmp(property, "Service") == 0 || strcmp(property, "Slice") == 0 ||
-        strcmp(property, "State") == 0)
-        return sd_bus_message_append(reply, "s",
-            strcmp(property, "State") == 0 ?
-            (dl_user_active_session_count(user) ? "active" : "online") : "");
+        strcmp(property, "Service") == 0 || strcmp(property, "Slice") == 0)
+        return sd_bus_message_append(reply, "s", "");
+    if (strcmp(property, "State") == 0) {
+        const char *state = dl_user_active_session_count(user) ? "active" :
+            dl_user_session_count(user) ? "online" :
+            dl_user_linger_enabled(user) ? "lingering" : "offline";
+        return sd_bus_message_append(reply, "s", state);
+    }
     if (strcmp(property, "Display") == 0)
-        return sd_bus_message_append(reply, "(so)", 0u, "/");
+        return sd_bus_message_append(reply, "(so)", "", "/");
     if (strcmp(property, "Linger") == 0)
         return sd_bus_message_append(reply, "b", dl_user_linger_enabled(user));
     if (strcmp(property, "IdleHint") == 0)
@@ -498,7 +503,8 @@ static int fallback_object_find(sd_bus *bus, const char *path,
     (void)error;
     if (strcmp(interface, "org.freedesktop.login1.Session") == 0) {
         r = decode_component(path, DL_LOGIN1_PATH "/session/", id, sizeof(id));
-        if (r >= 0 && dl_session_find(ctx->manager, id) != NULL) {
+        if (r >= 0 && dl_session_find(ctx->manager, id) != NULL &&
+            dl_session_get_state(dl_session_find(ctx->manager, id)) != DL_SESSION_CLOSED) {
             *ret_found = userdata;
             return 1;
         }
@@ -533,10 +539,17 @@ static const sd_bus_vtable manager_vtable[] = {
     SD_BUS_METHOD("ListSessions", "", "a(susso)", method_list_sessions, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("ListUsers", "", "a(uso)", method_list_users, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("ListSeats", "", "a(so)", method_list_seats, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_SIGNAL("SessionNew", "so", 0),
+    SD_BUS_SIGNAL("SessionRemoved", "so", 0),
+    SD_BUS_SIGNAL("UserNew", "uo", 0),
+    SD_BUS_SIGNAL("UserRemoved", "uo", 0),
+    SD_BUS_SIGNAL("SeatNew", "so", 0),
+    SD_BUS_SIGNAL("SeatRemoved", "so", 0),
     SD_BUS_VTABLE_END
 };
 
-int dl_dbus_open(dl_dbus *dbus, dl_manager *manager)
+static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
+                                 const char *address)
 {
     struct dbus_context *ctx;
     int r;
@@ -545,8 +558,22 @@ int dl_dbus_open(dl_dbus *dbus, dl_manager *manager)
     ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return -ENOMEM;
     ctx->manager = manager;
-    r = sd_bus_open_system(&dbus->bus);
-    if (r < 0) { free(ctx); return r; }
+    dbus->manager = manager;
+    dbus->event_cursor = dl_manager_event_generation(manager);
+    if (address) {
+        r = sd_bus_new(&dbus->bus);
+        if (r >= 0) r = sd_bus_set_address(dbus->bus, address);
+        if (r >= 0) r = sd_bus_set_bus_client(dbus->bus, 1);
+        if (r >= 0) r = sd_bus_start(dbus->bus);
+    } else {
+        r = sd_bus_open_system(&dbus->bus);
+    }
+    if (r < 0) {
+        sd_bus_unref(dbus->bus);
+        dbus->bus = NULL;
+        free(ctx);
+        return r;
+    }
     r = sd_bus_add_object_vtable(dbus->bus, &dbus->manager_slot,
                                  DL_LOGIN1_PATH, DL_LOGIN1_IFACE,
                                  manager_vtable, ctx);
@@ -592,6 +619,160 @@ int dl_dbus_open(dl_dbus *dbus, dl_manager *manager)
     return 0;
 }
 
+
+static int emit_manager_object_signal(dl_dbus *dbus, const char *member,
+                                       const char *signature, const char *id,
+                                       uint32_t uid, const char *kind)
+{
+    char path[256];
+    if (strcmp(kind, "user") == 0) {
+        if (path_for_user(uid, path, sizeof(path)) < 0) return -EINVAL;
+        return sd_bus_emit_signal(dbus->bus, DL_LOGIN1_PATH, DL_LOGIN1_IFACE,
+                                  member, signature, uid, path);
+    }
+    if (make_object_path(kind, id, path, sizeof(path)) < 0) return -EINVAL;
+    return sd_bus_emit_signal(dbus->bus, DL_LOGIN1_PATH, DL_LOGIN1_IFACE,
+                              member, signature, id, path);
+}
+
+static int emit_user_state_changed(dl_dbus *dbus, uint32_t uid)
+{
+    char path[256];
+    if (path_for_user(uid, path, sizeof(path)) < 0) return -EINVAL;
+    return sd_bus_emit_properties_changed(dbus->bus, path,
+        "org.freedesktop.login1.User", "State", NULL);
+}
+
+static int emit_session_state_changed(dl_dbus *dbus, const dl_event *event)
+{
+    char path[256];
+    int r = 0;
+    if (event->new_state != DL_SESSION_CLOSED) {
+        if (make_object_path("session", event->session_id, path, sizeof(path)) < 0)
+            return -EINVAL;
+        r = sd_bus_emit_properties_changed(dbus->bus, path,
+            "org.freedesktop.login1.Session", "Active", "State", NULL);
+        if (r < 0) return r;
+    }
+    return emit_user_state_changed(dbus, event->uid);
+}
+
+static int emit_seat_active_changed(dl_dbus *dbus, const dl_event *event)
+{
+    char path[256];
+    if (make_object_path("seat", event->seat_id, path, sizeof(path)) < 0)
+        return -EINVAL;
+    return sd_bus_emit_properties_changed(dbus->bus, path,
+        "org.freedesktop.login1.Seat", "ActiveSession", NULL);
+}
+
+static int emit_user_linger_changed(dl_dbus *dbus, uint32_t uid)
+{
+    char path[256];
+    if (path_for_user(uid, path, sizeof(path)) < 0) return -EINVAL;
+    return sd_bus_emit_properties_changed(dbus->bus, path,
+        "org.freedesktop.login1.User", "Linger", "State", NULL);
+}
+
+static int emit_resnapshot_properties(dl_dbus *dbus, dl_manager *manager)
+{
+    size_t i;
+    int r;
+    for (i = 0; i < dl_manager_session_count(manager); ++i) {
+        const dl_session *session = dl_manager_session_at(manager, i);
+        dl_event event = {0};
+        event.uid = dl_session_uid(session);
+        event.new_state = dl_session_get_state(session);
+        (void)snprintf(event.session_id, sizeof(event.session_id), "%s",
+                       dl_session_id(session));
+        r = emit_session_state_changed(dbus, &event);
+        if (r < 0) return r;
+    }
+    for (i = 0; i < dl_manager_user_count(manager); ++i) {
+        const dl_user *user = dl_manager_user_at(manager, i);
+        char path[256];
+        if (path_for_user(dl_user_uid(user), path, sizeof(path)) < 0)
+            return -EINVAL;
+        r = sd_bus_emit_properties_changed(dbus->bus, path,
+            "org.freedesktop.login1.User", "State", "Linger", NULL);
+        if (r < 0) return r;
+    }
+    for (i = 0; i < dl_manager_seat_count(manager); ++i) {
+        const dl_seat *seat = dl_manager_seat_at(manager, i);
+        dl_event event = {0};
+        (void)snprintf(event.seat_id, sizeof(event.seat_id), "%s",
+                       dl_seat_id(seat));
+        r = emit_seat_active_changed(dbus, &event);
+        if (r < 0) return r;
+    }
+    return 0;
+}
+
+static int process_core_events(dl_dbus *dbus)
+{
+    dl_event event;
+    dl_result result;
+    int r;
+    for (;;) {
+        result = dl_manager_next_event(dbus->manager, dbus->event_cursor, &event);
+        if (result == DL_ERR_NOT_FOUND) return 0;
+        if (result == DL_ERR_STATE && event.type == DL_EVENT_OVERFLOW) {
+            r = emit_resnapshot_properties(dbus, dbus->manager);
+            if (r >= 0) dbus->event_cursor = event.generation;
+            return r;
+        }
+        if (result != DL_OK) return -EIO;
+        switch (event.type) {
+        case DL_EVENT_USER_ADDED:
+            r = emit_manager_object_signal(dbus, "UserNew", "uo", NULL,
+                                           event.uid, "user");
+            break;
+        case DL_EVENT_SEAT_ADDED:
+            r = emit_manager_object_signal(dbus, "SeatNew", "so",
+                                           event.seat_id, 0, "seat");
+            break;
+        case DL_EVENT_SESSION_ADDED:
+            r = emit_manager_object_signal(dbus, "SessionNew", "so",
+                                           event.session_id, 0, "session");
+            if (r >= 0) r = emit_user_state_changed(dbus, event.uid);
+            break;
+        case DL_EVENT_SESSION_REMOVED:
+            r = emit_manager_object_signal(dbus, "SessionRemoved", "so",
+                                           event.session_id, 0, "session");
+            if (r >= 0) r = emit_user_state_changed(dbus, event.uid);
+            break;
+        case DL_EVENT_SESSION_STATE_CHANGED:
+            r = emit_session_state_changed(dbus, &event);
+            break;
+        case DL_EVENT_SEAT_ACTIVE_SESSION_CHANGED:
+            r = emit_seat_active_changed(dbus, &event);
+            break;
+        case DL_EVENT_USER_LINGER_CHANGED:
+            r = emit_user_linger_changed(dbus, event.uid);
+            break;
+        case DL_EVENT_NONE:
+        case DL_EVENT_OVERFLOW:
+        default:
+            r = 0;
+            break;
+        }
+        if (r < 0) return r;
+        dbus->event_cursor = event.generation;
+    }
+}
+
+int dl_dbus_open(dl_dbus *dbus, dl_manager *manager)
+{
+    return dl_dbus_open_internal(dbus, manager, NULL);
+}
+
+int dl_dbus_open_address(dl_dbus *dbus, dl_manager *manager,
+                         const char *address)
+{
+    if (!address || address[0] == '\0') return -EINVAL;
+    return dl_dbus_open_internal(dbus, manager, address);
+}
+
 int dl_dbus_get_fd(const dl_dbus *dbus)
 {
     if (!dbus || !dbus->bus) return -EINVAL;
@@ -611,7 +792,8 @@ int dl_dbus_process(dl_dbus *dbus)
     do {
         r = sd_bus_process(dbus->bus, NULL);
     } while (r > 0);
-    return r < 0 ? r : 0;
+    if (r < 0) return r;
+    return process_core_events(dbus);
 }
 
 void dl_dbus_close(dl_dbus *dbus)

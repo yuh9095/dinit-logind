@@ -14,8 +14,11 @@ typedef struct {
     sd_bus_slot *session_slot;
     sd_bus_slot *user_slot;
     sd_bus_slot *seat_slot;
+    dl_manager *manager;
+    uint64_t event_cursor;
 } dl_dbus;
 int dl_dbus_open(dl_dbus *dbus, dl_manager *manager);
+int dl_dbus_open_address(dl_dbus *dbus, dl_manager *manager, const char *address);
 int dl_dbus_process(dl_dbus *dbus);
 int dl_dbus_get_fd(const dl_dbus *dbus);
 int dl_dbus_get_events(const dl_dbus *dbus);
