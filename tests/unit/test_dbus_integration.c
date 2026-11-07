@@ -27,6 +27,12 @@ struct server_state {
     atomic_bool failed;
 };
 
+struct authority_state {
+    sd_bus *bus;
+    atomic_bool stop;
+    atomic_bool failed;
+};
+
 static int session_new_count;
 static int session_removed_count;
 static int properties_changed_count;
@@ -216,7 +222,6 @@ int main(void)
     if (r < 0) goto finish;
     r = sd_bus_request_name(authority.bus, "org.freedesktop.PolicyKit1", 0);
     if (r < 0) goto finish;
-    authority.bus = sd_bus_ref(authority.bus);
     if (pthread_create(&authority_thread, NULL, authority_thread_main,
                        &authority) != 0) goto finish;
     authority_started = 1;
