@@ -30,6 +30,7 @@ struct pending_authorization {
     sd_bus_message *request;
     char session_id[DL_SESSION_ID_MAX];
     enum session_operation operation;
+    int32_t signal_number;
     struct pending_authorization *next;
 };
 
@@ -108,15 +109,8 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
         break;
     }
     case SESSION_OP_KILL_LEADER: {
-        int32_t signo = 0;
-        /* The signal is stored in the original method message. */
-        if (sd_bus_message_rewind(pending->request, 1) < 0 ||
-            sd_bus_message_read(pending->request, "si", &member, &signo) < 0)
-            r = -EINVAL;
-        else {
-            dl_process_identity leader = dl_session_leader(session);
-            r = dl_linux_process_signal(&leader, signo);
-        }
+        dl_process_identity leader = dl_session_leader(session);
+        r = dl_linux_process_signal(&leader, pending->signal_number);
         break;
     }
     case SESSION_OP_LOCK:
@@ -145,6 +139,7 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
 static int authorize_session_async(sd_bus_message *m, struct dbus_context *ctx,
                                    const char *action,
                                    enum session_operation operation,
+                                   int32_t signal_number,
                                    sd_bus_error *error)
 {
     struct pending_authorization *pending = NULL;
@@ -168,6 +163,7 @@ static int authorize_session_async(sd_bus_message *m, struct dbus_context *ctx,
                                       "Unable to allocate authorization request");
     pending->ctx = ctx;
     pending->operation = operation;
+    pending->signal_number = signal_number;
     (void)snprintf(pending->session_id, sizeof(pending->session_id), "%s",
                    dl_session_id(session));
     pending->request = sd_bus_message_ref(m);
@@ -724,14 +720,14 @@ static int method_session_activate(sd_bus_message *m, void *userdata,
                                    sd_bus_error *error)
 {
     return authorize_session_async(m, userdata, "org.freedesktop.login1.chvt",
-                                   SESSION_OP_ACTIVATE, error);
+                                   SESSION_OP_ACTIVATE, 0, error);
 }
 
 static int method_session_terminate(sd_bus_message *m, void *userdata,
                                     sd_bus_error *error)
 {
     return authorize_session_async(m, userdata, "org.freedesktop.login1.manage",
-                                   SESSION_OP_TERMINATE, error);
+                                   SESSION_OP_TERMINATE, 0, error);
 }
 
 static int method_session_kill(sd_bus_message *m, void *userdata,
@@ -752,7 +748,7 @@ static int method_session_kill(sd_bus_message *m, void *userdata,
         return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.NotSupported",
                                       "Whole-session signaling requires cgroup process tracking");
     return authorize_session_async(m, userdata, "org.freedesktop.login1.manage",
-                                   SESSION_OP_KILL_LEADER, error);
+                                   SESSION_OP_KILL_LEADER, signo, error);
 }
 
 static int method_session_lock(sd_bus_message *m, void *userdata,

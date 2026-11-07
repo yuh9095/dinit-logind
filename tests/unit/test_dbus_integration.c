@@ -33,6 +33,33 @@ static int properties_changed_count;
 static int lock_signal_count;
 static int unlock_signal_count;
 
+static int fake_polkit_allow = 1;
+static unsigned int fake_polkit_calls;
+
+static int fake_polkit_check(sd_bus_message *message, void *userdata,
+                             sd_bus_error *error)
+{
+    sd_bus_message *reply = NULL;
+    int r;
+    (void)userdata;
+    (void)error;
+    ++fake_polkit_calls;
+    r = sd_bus_message_new_method_return(message, &reply);
+    if (r >= 0) r = sd_bus_message_append(reply, "bb", fake_polkit_allow, 0);
+    if (r >= 0) r = sd_bus_message_open_container(reply, 'a', "{ss}");
+    if (r >= 0) r = sd_bus_message_close_container(reply);
+    if (r >= 0) r = sd_bus_send(sd_bus_message_get_bus(message), reply, NULL);
+    sd_bus_message_unref(reply);
+    return r;
+}
+
+static const sd_bus_vtable fake_polkit_vtable[] = {
+    SD_BUS_VTABLE_START(0),
+    SD_BUS_METHOD("CheckAuthorization", "(sa{sv})sa{ss}us", "bba{ss}",
+                  fake_polkit_check, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_VTABLE_END
+};
+
 static int signal_counter(sd_bus_message *message, void *userdata,
                           sd_bus_error *error)
 {
@@ -117,6 +144,7 @@ int main(void)
     sd_bus *client = NULL;
     sd_bus_slot *new_slot = NULL, *removed_slot = NULL, *changed_slot = NULL;
     sd_bus_slot *lock_slot = NULL, *unlock_slot = NULL;
+    sd_bus_slot *polkit_slot = NULL;
     sd_bus_message *reply = NULL;
     sd_bus_error error = SD_BUS_ERROR_NULL;
     char object_path[256], user_path[256], seat_path[256];
@@ -143,6 +171,12 @@ int main(void)
     }
     stage = 2;
     if (open_client(&client, address) < 0) goto finish;
+    r = sd_bus_add_object_vtable(client, &polkit_slot,
+        "/org/freedesktop/PolicyKit1/Authority",
+        "org.freedesktop.PolicyKit1.Authority", fake_polkit_vtable, NULL);
+    if (r < 0) goto finish;
+    r = sd_bus_request_name(client, "org.freedesktop.PolicyKit1", 0);
+    if (r < 0) goto finish;
 
     stage = 3;
     r = sd_bus_add_match(client, &new_slot,
@@ -298,6 +332,16 @@ int main(void)
     reply = NULL;
 
     stage = 13;
+    fake_polkit_allow = 0;
+    r = sd_bus_call_method(client, LOGIN1_NAME, object_path, SESSION_IFACE,
+                           "Activate", &error, &reply, "");
+    if (r >= 0 || !sd_bus_error_has_name(&error,
+            "org.freedesktop.DBus.Error.AccessDenied"))
+        goto stop_server;
+    sd_bus_error_free(&error);
+    sd_bus_message_unref(reply);
+    reply = NULL;
+    fake_polkit_allow = 1;
     r = sd_bus_call_method(client, LOGIN1_NAME, object_path, SESSION_IFACE,
                            "Activate", &error, &reply, "");
     if (r < 0) goto stop_server;
@@ -455,6 +499,7 @@ stop_server:
 finish:
     sd_bus_message_unref(reply);
     sd_bus_error_free(&error);
+    sd_bus_slot_unref(polkit_slot);
     sd_bus_slot_unref(changed_slot);
     sd_bus_slot_unref(lock_slot);
     sd_bus_slot_unref(unlock_slot);
