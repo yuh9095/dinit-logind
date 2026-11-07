@@ -443,6 +443,18 @@ int main(void)
     sd_bus_message_unref(reply);
     reply = NULL;
 
+    /* SIGKILL for the whole session must also fail closed when this test
+     * session has no dinit-logind-owned cgroup. */
+    stage = 171;
+    r = sd_bus_call_method(client, LOGIN1_NAME, object_path, SESSION_IFACE,
+                           "Kill", &error, &reply, "si", "all", SIGKILL);
+    if (r >= 0 || !sd_bus_error_has_name(&error,
+            "org.freedesktop.DBus.Error.NotSupported"))
+        goto stop_server;
+    sd_bus_error_free(&error);
+    sd_bus_message_unref(reply);
+    reply = NULL;
+
     stage = 18;
     child_pid = fork();
     if (child_pid < 0) goto stop_server;
