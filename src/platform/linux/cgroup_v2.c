@@ -15,7 +15,6 @@
 #include <sys/syscall.h>
 #include <sys/vfs.h>
 #include <unistd.h>
-#include <linux/magic.h>
 
 #ifndef CGROUP2_SUPER_MAGIC
 #define CGROUP2_SUPER_MAGIC 0x63677270
