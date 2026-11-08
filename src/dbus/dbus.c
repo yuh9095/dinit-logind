@@ -7,6 +7,7 @@
 #include "../platform/linux/cgroup_v2.h"
 #include "../session/termination.h"
 #include "../session/termination_store.h"
+#include "../runtime/runtime.h"
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <signal.h>
@@ -34,7 +35,8 @@ enum session_operation {
     SESSION_OP_KILL_LEADER,
     SESSION_OP_KILL_ALL,
     SESSION_OP_LOCK,
-    SESSION_OP_UNLOCK
+    SESSION_OP_UNLOCK,
+    SESSION_OP_SET_USER_LINGER
 };
 
 struct pending_authorization {
@@ -44,6 +46,9 @@ struct pending_authorization {
     char session_id[DL_SESSION_ID_MAX];
     enum session_operation operation;
     int32_t signal_number;
+    uint32_t user_uid;
+    bool user_linger_enabled;
+    uint32_t polkit_flags;
     struct pending_authorization *next;
 };
 
@@ -66,6 +71,7 @@ struct dbus_context {
     uint32_t terminate_timeout_sec;
     dl_termination_store termination_store;
     bool termination_store_open;
+    dl_runtime_paths runtime_paths;
     struct inhibitor_record *inhibitors;
 };
 
@@ -122,6 +128,48 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
                                challenge ? "Polkit authorization requires interaction" :
                                            "Polkit authorization was denied or unavailable");
         (void)sd_bus_reply_method_error(pending->request, &error);
+        sd_bus_error_free(&error);
+        pending_authorization_free(pending);
+        return 1;
+    }
+
+    if (pending->operation == SESSION_OP_SET_USER_LINGER) {
+        struct passwd pwd, *result = NULL;
+        char scratch[16384];
+        int lookup = getpwuid_r((uid_t)pending->user_uid, &pwd, scratch,
+                                sizeof(scratch), &result);
+        if (lookup != 0 || !result) {
+            sd_bus_error_set_const(&error, "org.freedesktop.login1.NoSuchUser",
+                                   "The requested UID has no passwd entry");
+            (void)sd_bus_reply_method_error(pending->request, &error);
+        } else {
+            dl_result runtime_result = dl_runtime_set_linger(
+                &ctx->runtime_paths, pending->user_uid,
+                pending->user_linger_enabled);
+            if (runtime_result != DL_OK) {
+                sd_bus_error_set_const(&error,
+                    runtime_result == DL_ERR_NOT_FOUND ?
+                    "org.freedesktop.DBus.Error.NotSupported" :
+                    "org.freedesktop.login1.OperationFailed",
+                    "Persistent linger storage is unavailable or unsafe");
+                (void)sd_bus_reply_method_error(pending->request, &error);
+            } else if (dl_user_set_linger(ctx->manager, pending->user_uid,
+                                          pending->user_linger_enabled) != DL_OK) {
+                /* The persistent marker remains authoritative; retrying the
+                 * request will reconcile the in-memory state. */
+                sd_bus_error_set_const(&error,
+                    "org.freedesktop.login1.OperationFailed",
+                    "Unable to update the user state");
+                (void)sd_bus_reply_method_error(pending->request, &error);
+            } else {
+                char user_path[256];
+                if (path_for_user(pending->user_uid, user_path,
+                                  sizeof(user_path)) == 0)
+                    (void)sd_bus_emit_properties_changed(ctx->bus, user_path,
+                        "org.freedesktop.login1.User", "Linger", "State", NULL);
+                (void)sd_bus_reply_method_return(pending->request, "");
+            }
+        }
         sd_bus_error_free(&error);
         pending_authorization_free(pending);
         return 1;
@@ -361,7 +409,68 @@ static int authorize_session_async(sd_bus_message *m, struct dbus_context *ctx,
     if (r >= 0) r = sd_bus_message_append(call, "s", action);
     if (r >= 0) r = sd_bus_message_open_container(call, 'a', "{ss}");
     if (r >= 0) r = sd_bus_message_close_container(call);
-    if (r >= 0) r = sd_bus_message_append(call, "us", 1u, "");
+    if (r >= 0) r = sd_bus_message_append(call, "us", pending->polkit_flags, "");
+    if (r >= 0) r = sd_bus_call_async(ctx->bus, &pending->slot, call,
+                                      session_authorization_reply, pending,
+                                      DL_POLKIT_AUTH_TIMEOUT_USEC);
+    sd_bus_message_unref(call);
+    if (r < 0) {
+        pending_authorization_free(pending);
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.AccessDenied",
+                                      "Unable to contact Polkit authority");
+    }
+    return 1;
+}
+
+static int method_set_user_linger(sd_bus_message *m, void *userdata,
+                                    sd_bus_error *error)
+{
+    struct dbus_context *ctx = userdata;
+    struct pending_authorization *pending = NULL;
+    sd_bus_message *call = NULL;
+    uint32_t uid;
+    int enable, interactive, r;
+
+    r = sd_bus_message_read(m, "ubb", &uid, &enable, &interactive);
+    if (r < 0) return r;
+    if (enable != 0 && enable != 1)
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.InvalidArgs",
+                                      "Invalid linger enable flag");
+    if (interactive != 0 && interactive != 1)
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.InvalidArgs",
+                                      "Invalid interactive flag");
+    if (uid == 0)
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.InvalidArgs",
+                                      "Linger for the root user is not supported");
+
+    pending = calloc(1, sizeof(*pending));
+    if (!pending)
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.NoMemory",
+                                      "Unable to allocate authorization request");
+    pending->ctx = ctx;
+    pending->operation = SESSION_OP_SET_USER_LINGER;
+    pending->user_uid = uid;
+    pending->user_linger_enabled = enable != 0;
+    pending->polkit_flags = interactive ? 1u : 0u;
+    pending->request = sd_bus_message_ref(m);
+    pending->next = ctx->pending;
+    ctx->pending = pending;
+
+    r = sd_bus_message_new_method_call(ctx->bus, &call,
+        "org.freedesktop.PolicyKit1", "/org/freedesktop/PolicyKit1/Authority",
+        "org.freedesktop.PolicyKit1.Authority", "CheckAuthorization");
+    if (r >= 0) r = sd_bus_message_open_container(call, 'r', "sa{sv}");
+    if (r >= 0) r = sd_bus_message_append(call, "s", "system-bus-name");
+    if (r >= 0) r = sd_bus_message_open_container(call, 'a', "{sv}");
+    if (r >= 0) r = sd_bus_message_append(call, "{sv}", "name", "s",
+                                           sd_bus_message_get_sender(m));
+    if (r >= 0) r = sd_bus_message_close_container(call);
+    if (r >= 0) r = sd_bus_message_close_container(call);
+    if (r >= 0) r = sd_bus_message_append(call, "s",
+                                           "org.freedesktop.login1.set-user-linger");
+    if (r >= 0) r = sd_bus_message_open_container(call, 'a', "{ss}");
+    if (r >= 0) r = sd_bus_message_close_container(call);
+    if (r >= 0) r = sd_bus_message_append(call, "us", pending->polkit_flags, "");
     if (r >= 0) r = sd_bus_call_async(ctx->bus, &pending->slot, call,
                                       session_authorization_reply, pending,
                                       DL_POLKIT_AUTH_TIMEOUT_USEC);
@@ -1309,6 +1418,7 @@ static const sd_bus_vtable manager_vtable[] = {
     SD_BUS_METHOD("ListSessions", "", "a(susso)", method_list_sessions, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("ListUsers", "", "a(uso)", method_list_users, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("ListSeats", "", "a(so)", method_list_seats, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("SetUserLinger", "ubb", "", method_set_user_linger, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_SIGNAL("SessionNew", "so", 0),
     SD_BUS_SIGNAL("SessionRemoved", "so", 0),
     SD_BUS_SIGNAL("UserNew", "uo", 0),
@@ -1446,6 +1556,9 @@ static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
     ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return -ENOMEM;
     ctx->manager = manager;
+    ctx->runtime_paths.runtime_base = "/run/user";
+    ctx->runtime_paths.linger_directory = "/var/lib/dinit-logind/linger";
+    ctx->runtime_paths.trusted_owner = 0;
     ctx->terminate_timeout_sec = 90;
     dl_termination_queue_init(&ctx->terminations, 90);
     dbus->manager = manager;
