@@ -513,6 +513,11 @@ static int method_inhibit(sd_bus_message *m, void *userdata,
             "org.freedesktop.DBus.Error.InvalidArgs",
             "Inhibit requires bounded what/who/why strings and block or delay mode");
 
+    if (strcmp(mode, "delay") == 0)
+        return sd_bus_error_set_const(error,
+            "org.freedesktop.DBus.Error.NotSupported",
+            "Delay inhibitors are unavailable until power-transition coordination is enabled");
+
     r = sd_bus_query_sender_creds(m, SD_BUS_CREDS_EUID | SD_BUS_CREDS_PID, &creds);
     if (r < 0)
         return sd_bus_error_set_const(error,
@@ -1252,7 +1257,7 @@ static int manager_property(sd_bus *bus, const char *path,
         return sd_bus_message_append(reply, "t", count);
     }
     if (strcmp(property, "InhibitDelayMaxUSec") == 0)
-        return sd_bus_message_append(reply, "t", (uint64_t)5000000);
+        return sd_bus_message_append(reply, "t", (uint64_t)0);
     if (strcmp(property, "BlockInhibited") != 0 &&
         strcmp(property, "DelayInhibited") != 0)
         return property_unknown(error, property);
