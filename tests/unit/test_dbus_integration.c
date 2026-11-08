@@ -378,6 +378,69 @@ int main(void)
     sd_bus_message_unref(reply);
     reply = NULL;
 
+    /* Inhibitors are represented by a passed pipe FD and live exactly as
+     * long as at least one client copy of that FD remains open. */
+    {
+        int inhibitor_fd = -1;
+        unsigned int inhibitor_count = 0;
+        const char *what, *who, *why, *mode;
+        uint32_t inhibitor_uid;
+
+        stage = 121;
+        r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
+            "Inhibit", &error, &reply, "ssss",
+            "sleep", "dinit-logind-test", "integration test", "block");
+        if (r < 0 || sd_bus_message_read(reply, "h", &inhibitor_fd) < 0 ||
+            inhibitor_fd < 0)
+            goto stop_server;
+        sd_bus_message_unref(reply);
+        reply = NULL;
+
+        r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
+            "ListInhibitors", &error, &reply, "");
+        if (r < 0 || sd_bus_message_enter_container(reply, 'a', "(ssssu)") <= 0)
+            goto stop_server;
+        r = sd_bus_message_enter_container(reply, 'r', "ssssu");
+        if (r <= 0 || sd_bus_message_read(reply, "ssssu", &what, &who, &why,
+                                          &mode, &inhibitor_uid) < 0 ||
+            strcmp(what, "sleep") != 0 ||
+            strcmp(who, "dinit-logind-test") != 0 ||
+            strcmp(why, "integration test") != 0 ||
+            strcmp(mode, "block") != 0 ||
+            inhibitor_uid != (uint32_t)geteuid())
+            goto stop_server;
+        inhibitor_count = 1;
+        if (sd_bus_message_exit_container(reply) < 0 ||
+            sd_bus_message_enter_container(reply, 'r', "ssssu") != 0 ||
+            sd_bus_message_exit_container(reply) < 0)
+            goto stop_server;
+        sd_bus_message_unref(reply);
+        reply = NULL;
+        if (close(inhibitor_fd) != 0) goto stop_server;
+
+        /* dl_dbus_process reaps the server-side pipe after the client closes
+         * its last FD, before answering the next request. */
+        r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
+            "ListInhibitors", &error, &reply, "");
+        if (r < 0 || sd_bus_message_enter_container(reply, 'a', "(ssssu)") <= 0 ||
+            sd_bus_message_enter_container(reply, 'r', "ssssu") != 0 ||
+            sd_bus_message_exit_container(reply) < 0 ||
+            sd_bus_message_exit_container(reply) < 0 || inhibitor_count != 1)
+            goto stop_server;
+        sd_bus_message_unref(reply);
+        reply = NULL;
+
+        r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
+            "Inhibit", &error, &reply, "ssss",
+            "sleep", "dinit-logind-test", "invalid mode", "ignore");
+        if (r >= 0 || !sd_bus_error_has_name(&error,
+                "org.freedesktop.DBus.Error.InvalidArgs"))
+            goto stop_server;
+        sd_bus_error_free(&error);
+        sd_bus_message_unref(reply);
+        reply = NULL;
+    }
+
     stage = 13;
     atomic_store(&fake_polkit_allow, 0);
     r = sd_bus_call_method(client, LOGIN1_NAME, object_path, SESSION_IFACE,
