@@ -48,20 +48,42 @@ bool dl_termination_queue_contains(const dl_termination_queue *queue,
     return false;
 }
 
+int dl_termination_queue_schedule_at(dl_termination_queue *queue,
+                                     const char *session_id,
+                                     const struct timespec *deadline,
+                                     void *payload,
+                                     dl_termination_kill_fn kill_fn,
+                                     dl_termination_release_fn release_fn)
+{
+    dl_termination_item *item;
+    size_t id_len;
+    if (!queue || !session_id || !deadline || !payload || !kill_fn ||
+        !release_fn || deadline->tv_sec < 0 || deadline->tv_nsec < 0 ||
+        deadline->tv_nsec >= 1000000000L)
+        return -EINVAL;
+    if (dl_termination_queue_contains(queue, session_id)) return -EALREADY;
+    id_len = strlen(session_id);
+    if (id_len == 0 || id_len >= sizeof(item->session_id)) return -EINVAL;
+    item = calloc(1, sizeof(*item));
+    if (!item) return -ENOMEM;
+    memcpy(item->session_id, session_id, id_len + 1);
+    item->deadline = *deadline;
+    item->payload = payload;
+    item->kill_fn = kill_fn;
+    item->release_fn = release_fn;
+    item->next = queue->head;
+    queue->head = item;
+    return 0;
+}
+
 int dl_termination_queue_schedule(dl_termination_queue *queue,
                                   const char *session_id, void *payload,
                                   dl_termination_kill_fn kill_fn,
                                   dl_termination_release_fn release_fn)
 {
-    dl_termination_item *item;
-    struct timespec now;
-    size_t id_len;
-    if (!queue || !session_id || !payload || !kill_fn || !release_fn ||
-        queue->timeout_sec < 1 || queue->timeout_sec > 86400)
+    struct timespec now, deadline;
+    if (!queue || queue->timeout_sec < 1 || queue->timeout_sec > 86400)
         return -EINVAL;
-    if (dl_termination_queue_contains(queue, session_id)) return -EALREADY;
-    id_len = strlen(session_id);
-    if (id_len == 0 || id_len >= sizeof(item->session_id)) return -EINVAL;
     if (!queue->clock_fn) queue->clock_fn = default_clock;
     if (queue->clock_fn(&now) != 0)
         return errno ? -errno : -EIO;
@@ -69,21 +91,11 @@ int dl_termination_queue_schedule(dl_termination_queue *queue,
         now.tv_nsec >= 1000000000L) return -EINVAL;
     if ((uintmax_t)now.tv_sec > (uintmax_t)INTMAX_MAX -
                                 queue->timeout_sec) return -EOVERFLOW;
-    item = calloc(1, sizeof(*item));
-    if (!item) return -ENOMEM;
-    memcpy(item->session_id, session_id, id_len + 1);
-    item->deadline = now;
-    item->deadline.tv_sec += (time_t)queue->timeout_sec;
-    if (item->deadline.tv_sec < now.tv_sec) {
-        free(item);
-        return -EOVERFLOW;
-    }
-    item->payload = payload;
-    item->kill_fn = kill_fn;
-    item->release_fn = release_fn;
-    item->next = queue->head;
-    queue->head = item;
-    return 0;
+    deadline = now;
+    deadline.tv_sec += (time_t)queue->timeout_sec;
+    if (deadline.tv_sec < now.tv_sec) return -EOVERFLOW;
+    return dl_termination_queue_schedule_at(queue, session_id, &deadline,
+                                            payload, kill_fn, release_fn);
 }
 
 static void item_release(dl_termination_item *item)

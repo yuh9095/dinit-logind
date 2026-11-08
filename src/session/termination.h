@@ -35,6 +35,13 @@ int dl_termination_queue_schedule(dl_termination_queue *queue,
                                   const char *session_id, void *payload,
                                   dl_termination_kill_fn kill_fn,
                                   dl_termination_release_fn release_fn);
+/* Restore a previously persisted absolute CLOCK_MONOTONIC deadline. */
+int dl_termination_queue_schedule_at(dl_termination_queue *queue,
+                                     const char *session_id,
+                                     const struct timespec *deadline,
+                                     void *payload,
+                                     dl_termination_kill_fn kill_fn,
+                                     dl_termination_release_fn release_fn);
 /* Clock failures postpone work; kill failures remain queued for retry. */
 int dl_termination_queue_process(dl_termination_queue *queue);
 /* Attempts every pending kill and releases all payloads during shutdown. */

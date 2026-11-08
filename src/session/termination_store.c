@@ -56,6 +56,7 @@ static uint64_t checksum_bytes(const void *data, size_t size)
 
 static int record_valid(const dl_termination_record *r)
 {
+    size_t i;
     if (!r || !valid_component(r->session_id, sizeof(r->session_id)) ||
         !valid_component(r->cgroup_name, sizeof(r->cgroup_name)) ||
         strnlen(r->boot_id, sizeof(r->boot_id)) != 36 ||
@@ -64,6 +65,16 @@ static int record_valid(const dl_termination_record *r)
         r->leader_pid == 0 || r->leader_start_time == 0 ||
         r->pid_namespace_inode == 0)
         return -EINVAL;
+    for (i = 0; i < 36; ++i) {
+        unsigned char ch = (unsigned char)r->boot_id[i];
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (ch != '-') return -EINVAL;
+        } else if (!((ch >= '0' && ch <= '9') ||
+                     (ch >= 'a' && ch <= 'f') ||
+                     (ch >= 'A' && ch <= 'F'))) {
+            return -EINVAL;
+        }
+    }
     return 0;
 }
 
@@ -125,7 +136,23 @@ int dl_termination_store_put(dl_termination_store *store,
     memset(&disk, 0, sizeof(disk));
     disk.magic = STORE_MAGIC;
     disk.version = STORE_VERSION;
-    disk.record = *record;
+    /* Copy each field into the zeroed on-disk object. This keeps padding
+     * deterministic and prevents leaking caller-side uninitialized bytes. */
+    memcpy(disk.record.session_id, record->session_id,
+           sizeof(disk.record.session_id));
+    memcpy(disk.record.boot_id, record->boot_id,
+           sizeof(disk.record.boot_id));
+    memcpy(disk.record.cgroup_name, record->cgroup_name,
+           sizeof(disk.record.cgroup_name));
+    disk.record.deadline_sec = record->deadline_sec;
+    disk.record.deadline_nsec = record->deadline_nsec;
+    disk.record.parent_dev = record->parent_dev;
+    disk.record.parent_ino = record->parent_ino;
+    disk.record.cgroup_dev = record->cgroup_dev;
+    disk.record.cgroup_ino = record->cgroup_ino;
+    disk.record.leader_pid = record->leader_pid;
+    disk.record.leader_start_time = record->leader_start_time;
+    disk.record.pid_namespace_inode = record->pid_namespace_inode;
     disk.checksum = checksum_bytes(&disk, offsetof(struct disk_record, checksum));
     n = snprintf(temp, sizeof(temp), ".tmp-%ld-%s", (long)getpid(),
                  record->session_id);
