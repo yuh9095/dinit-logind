@@ -1073,6 +1073,119 @@ static const sd_bus_vtable manager_vtable[] = {
     SD_BUS_VTABLE_END
 };
 
+#define DL_TERMINATION_STATE_PARENT "/var/lib/dinit-logind"
+#define DL_TERMINATION_STATE_PATH "/var/lib/dinit-logind/terminations"
+
+struct termination_recovery_context {
+    struct dbus_context *dbus;
+    dl_linux_cgroup_v2 *parent;
+    char boot_id[DL_TERMINATION_BOOT_ID_MAX];
+};
+
+static int termination_recover_record(const dl_termination_record *record,
+                                      void *userdata)
+{
+    struct termination_recovery_context *recovery = userdata;
+    struct dbus_context *ctx = recovery->dbus;
+    dl_linux_cgroup_v2_session cgroup = {-1, -1, {0}};
+    struct termination_payload *payload;
+    struct timespec deadline;
+    bool same_boot = strcmp(record->boot_id, recovery->boot_id) == 0;
+    int r;
+
+    if (dl_termination_queue_contains(&ctx->terminations, record->session_id))
+        return 0;
+    r = dl_linux_cgroup_v2_session_open_recovery(
+        recovery->parent, record->cgroup_name,
+        record->parent_dev, record->parent_ino,
+        record->cgroup_dev, record->cgroup_ino, &cgroup);
+    if (r == -ENOENT) {
+        /* The exact recorded cgroup is gone; no process can be targeted. */
+        return dl_termination_store_remove(&ctx->termination_store,
+                                           record->session_id);
+    }
+    if (r < 0) {
+        fprintf(stderr,
+            "dinit-logind: refusing termination recovery for %s: cgroup identity check failed (%d)\n",
+            record->session_id, r);
+        return 0; /* Preserve the record for an administrator/retry. */
+    }
+    if (!same_boot) {
+        /* CLOCK_MONOTONIC is boot-relative. Never replay an old deadline. */
+        dl_linux_cgroup_v2_session_release(&cgroup);
+        fprintf(stderr,
+            "dinit-logind: preserving stale-boot termination record for %s; not replaying it\n",
+            record->session_id);
+        return 0;
+    }
+    deadline.tv_sec = (time_t)record->deadline_sec;
+    deadline.tv_nsec = (long)record->deadline_nsec;
+    if (deadline.tv_sec < 0 || (uint64_t)deadline.tv_sec != record->deadline_sec) {
+        dl_linux_cgroup_v2_session_release(&cgroup);
+        return -ERANGE;
+    }
+    payload = calloc(1, sizeof(*payload));
+    if (!payload) {
+        dl_linux_cgroup_v2_session_release(&cgroup);
+        return -ENOMEM;
+    }
+    payload->cgroup = cgroup;
+    payload->store = &ctx->termination_store;
+    (void)snprintf(payload->session_id, sizeof(payload->session_id), "%s",
+                   record->session_id);
+    cgroup.fd = -1;
+    cgroup.parent_fd = -1;
+    cgroup.name[0] = '\0';
+    r = dl_termination_queue_schedule_at(
+        &ctx->terminations, record->session_id, &deadline, payload,
+        termination_cgroup_kill, termination_cgroup_release);
+    if (r < 0) {
+        termination_cgroup_release(payload);
+        if (r == -EALREADY) return 0;
+        return r;
+    }
+    fprintf(stderr,
+        "dinit-logind: restored pending termination for session %s\n",
+        record->session_id);
+    return 0;
+}
+
+static int termination_recover_all(struct dbus_context *ctx)
+{
+    struct termination_recovery_context recovery;
+    dl_linux_cgroup_v2 parent = {-1, {0}};
+    struct stat st;
+    int r;
+
+    if (!ctx || !ctx->termination_store_open) return -EINVAL;
+    if (mkdir(DL_TERMINATION_STATE_PARENT, 0700) != 0 && errno != EEXIST)
+        return -errno;
+    if (lstat(DL_TERMINATION_STATE_PARENT, &st) != 0) return -errno;
+    if (!S_ISDIR(st.st_mode) || st.st_uid != 0 || (st.st_mode & 0077) != 0)
+        return -EPERM;
+    r = dl_linux_cgroup_v2_open_current(&parent);
+    if (r < 0) {
+        fprintf(stderr,
+            "dinit-logind: cannot inspect delegated cgroup for termination recovery (%d); records retained\n",
+            r);
+        return 0;
+    }
+    memset(&recovery, 0, sizeof(recovery));
+    recovery.dbus = ctx;
+    recovery.parent = &parent;
+    r = dl_termination_store_read_boot_id(recovery.boot_id);
+    if (r == 0)
+        r = dl_termination_store_foreach(&ctx->termination_store,
+                                         termination_recover_record,
+                                         &recovery);
+    if (r < 0)
+        fprintf(stderr,
+            "dinit-logind: termination journal scan/recovery stopped safely (%d)\n",
+            r);
+    dl_linux_cgroup_v2_close(&parent);
+    return 0; /* Invalid records must not prevent the login service starting. */
+}
+
 static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
                                  const char *address)
 {
@@ -1133,6 +1246,24 @@ static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
         sd_bus_unref(dbus->bus); dbus->bus = NULL; free(ctx); return r;
     }
     ctx->bus = dbus->bus;
+    if (mkdir(DL_TERMINATION_STATE_PARENT, 0700) != 0 && errno != EEXIST) {
+        r = -errno;
+        goto fail_bus_setup;
+    }
+    {
+        struct stat state_parent;
+        if (lstat(DL_TERMINATION_STATE_PARENT, &state_parent) != 0 ||
+            !S_ISDIR(state_parent.st_mode) || state_parent.st_uid != 0 ||
+            (state_parent.st_mode & 0077) != 0) {
+            r = errno ? -errno : -EPERM;
+            goto fail_bus_setup;
+        }
+    }
+    r = dl_termination_store_open(&ctx->termination_store,
+                                  DL_TERMINATION_STATE_PATH, 1);
+    if (r < 0) goto fail_bus_setup;
+    ctx->termination_store_open = true;
+    (void)termination_recover_all(ctx);
     r = sd_bus_request_name(dbus->bus, DL_LOGIN1_NAME, 0);
     if (r < 0) {
         sd_bus_slot_unref(dbus->seat_slot);
@@ -1141,10 +1272,23 @@ static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
         sd_bus_slot_unref(dbus->manager_slot);
         sd_bus_unref(dbus->bus);
         dbus->bus = NULL;
+        if (ctx->termination_store_open)
+            dl_termination_store_close(&ctx->termination_store);
         free(ctx);
         return r;
     }
     return 0;
+fail_bus_setup:
+    sd_bus_slot_unref(dbus->seat_slot);
+    sd_bus_slot_unref(dbus->user_slot);
+    sd_bus_slot_unref(dbus->session_slot);
+    sd_bus_slot_unref(dbus->manager_slot);
+    sd_bus_unref(dbus->bus);
+    dbus->bus = NULL;
+    if (ctx->termination_store_open)
+        dl_termination_store_close(&ctx->termination_store);
+    free(ctx);
+    return r;
 }
 
 
@@ -1350,6 +1494,10 @@ void dl_dbus_close(dl_dbus *dbus)
     if (dbus->manager_slot) ctx = sd_bus_slot_get_userdata(dbus->manager_slot);
     if (ctx) dl_termination_queue_finish(&ctx->terminations);
     pending_authorizations_cancel(ctx);
+    if (ctx && ctx->termination_store_open) {
+        dl_termination_store_close(&ctx->termination_store);
+        ctx->termination_store_open = false;
+    }
     sd_bus_slot_unref(dbus->seat_slot);
     sd_bus_slot_unref(dbus->user_slot);
     sd_bus_slot_unref(dbus->session_slot);
