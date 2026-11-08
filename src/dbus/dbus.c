@@ -122,7 +122,8 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
         dl_linux_cgroup_v2_session *payload = NULL;
         dl_process_identity leader = dl_session_leader(session);
 
-        if (dl_termination_queue_contains(&ctx->terminations,
+        if (dl_session_is_stopping(session) ||
+            dl_termination_queue_contains(&ctx->terminations,
                                          pending->session_id)) {
             r = 0;
             break;
@@ -154,14 +155,30 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
                 dl_linux_cgroup_v2_session *queued_payload = payload;
                 int signal_result;
                 payload = NULL;
-                signal_result = dl_linux_cgroup_v2_session_signal_all(
-                    queued_payload, SIGTERM);
-                if (signal_result < 0) {
+                if (dl_session_begin_stop(ctx->manager,
+                                          pending->session_id) != DL_OK) {
                     fprintf(stderr,
-                        "dinit-logind: initial SIGTERM for session %s failed (%d); "
-                        "retaining deferred SIGKILL\\n",
-                        pending->session_id, signal_result);
-                    r = signal_result;
+                        "dinit-logind: session %s disappeared while scheduling termination\\n",
+                        pending->session_id);
+                    r = -ESTALE;
+                } else {
+                    int term_result, cont_result, hup_result;
+                    /* Match the login session scope policy: TERM, CONT, HUP. */
+                    term_result = dl_linux_cgroup_v2_session_signal_all(
+                        queued_payload, SIGTERM);
+                    cont_result = dl_linux_cgroup_v2_session_signal_all(
+                        queued_payload, SIGCONT);
+                    hup_result = dl_linux_cgroup_v2_session_signal_all(
+                        queued_payload, SIGHUP);
+                    signal_result = term_result < 0 ? term_result :
+                                    cont_result < 0 ? cont_result : hup_result;
+                    if (signal_result < 0) {
+                        fprintf(stderr,
+                            "dinit-logind: initial session signals for %s failed "
+                            "(TERM=%d CONT=%d HUP=%d); retaining deferred SIGKILL\\n",
+                            pending->session_id, term_result, cont_result, hup_result);
+                        r = signal_result;
+                    }
                 }
             }
         }
@@ -675,6 +692,7 @@ static int session_property(sd_bus *bus, const char *path, const char *interface
                                      dl_session_get_state(session) == DL_SESSION_ACTIVE);
     if (strcmp(property, "State") == 0)
         return sd_bus_message_append(reply, "s",
+            dl_session_is_stopping(session) ? "closing" :
             dl_session_get_state(session) == DL_SESSION_ACTIVE ? "active" : "online");
     if (strcmp(property, "CanIdle") == 0 || strcmp(property, "CanLock") == 0 ||
         strcmp(property, "LockedHint") == 0 || strcmp(property, "IdleHint") == 0)

@@ -124,6 +124,14 @@ int main(void)
     assert(strcmp(dl_seat_active_session_id(seat), dl_session_id(second)) == 0);
     assert(dl_seat_session_count(seat) == 2);
 
+    /* Stopping is orthogonal to active/open and persists after the deferred
+     * kill queue completes, matching logind's Session lifecycle. */
+    assert(dl_session_begin_stop(manager, first_id) == DL_OK);
+    assert(dl_session_is_stopping(first));
+    assert(dl_session_begin_stop(manager, first_id) == DL_OK);
+    assert(dl_session_activate(manager, first_id) == DL_ERR_STATE);
+    assert(dl_session_deactivate(manager, first_id) == DL_ERR_STATE);
+
     assert(dl_session_deactivate(manager, dl_session_id(second)) == DL_OK);
     assert(dl_session_get_state(second) == DL_SESSION_OPEN);
     assert(dl_user_active_session_count(dl_user_find(manager, 1000)) == 0);

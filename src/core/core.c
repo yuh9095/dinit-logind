@@ -27,6 +27,7 @@ struct dl_session {
     uint32_t uid;
     dl_process_identity leader;
     dl_session_state state;
+    bool stopping;
     char seat[DL_METADATA_MAX];
     uint32_t vtnr;
     char tty[DL_METADATA_MAX];
@@ -365,11 +366,28 @@ dl_result dl_session_close(dl_manager *manager, const char *session_id)
     return DL_OK;
 }
 
-dl_result dl_session_activate(dl_manager *manager, const char *session_id)
+dl_result dl_session_begin_stop(dl_manager *manager, const char *session_id)
 {
     struct dl_session *session = dl_session_find(manager, session_id);
     if (session == NULL) return DL_ERR_NOT_FOUND;
     if (session->state == DL_SESSION_CLOSED) return DL_ERR_STATE;
+    if (session->stopping) return DL_OK;
+    session->stopping = true;
+    event_session_state(manager, session, session->state);
+    return DL_OK;
+}
+
+bool dl_session_is_stopping(const dl_session *session)
+{
+    return session != NULL && session->stopping;
+}
+
+dl_result dl_session_activate(dl_manager *manager, const char *session_id)
+{
+    struct dl_session *session = dl_session_find(manager, session_id);
+    if (session == NULL) return DL_ERR_NOT_FOUND;
+    if (session->state == DL_SESSION_CLOSED || session->stopping)
+        return DL_ERR_STATE;
     if (session->state == DL_SESSION_ACTIVE &&
         (session->seat_object == NULL ||
          session->seat_object->active_session == session))
@@ -404,7 +422,8 @@ dl_result dl_session_deactivate(dl_manager *manager, const char *session_id)
     struct dl_session *session = dl_session_find(manager, session_id);
     bool seat_active;
     if (session == NULL) return DL_ERR_NOT_FOUND;
-    if (session->state == DL_SESSION_CLOSED) return DL_ERR_STATE;
+    if (session->state == DL_SESSION_CLOSED || session->stopping)
+        return DL_ERR_STATE;
     seat_active = session->seat_object != NULL &&
                   session->seat_object->active_session == session;
     if (session->state == DL_SESSION_ACTIVE) {

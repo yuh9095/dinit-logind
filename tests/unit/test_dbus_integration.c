@@ -580,6 +580,7 @@ int main(void)
         if (child_pid < 0) goto stop_server;
         if (child_pid == 0) {
             (void)signal(SIGTERM, SIG_IGN);
+            (void)signal(SIGHUP, SIG_IGN);
             for (;;) pause();
         }
         memset(&child_spec, 0, sizeof(child_spec));
@@ -655,6 +656,14 @@ int main(void)
             if (!WIFSIGNALED(child_status) || WTERMSIG(child_status) != SIGKILL)
                 goto stop_server;
             child_pid = -1;
+
+            /* Once the grace-period kill has completed, Terminate remains
+             * idempotent until the Session itself is closed. */
+            r = sd_bus_call_method(client, LOGIN1_NAME, child_path,
+                SESSION_IFACE, "Terminate", &error, &reply, "");
+            if (r < 0) goto stop_server;
+            sd_bus_message_unref(reply);
+            reply = NULL;
         } else {
             fprintf(stderr,
                 "Skipping positive Terminate integration: writable delegated "
@@ -720,6 +729,7 @@ int main(void)
         if (child_pid < 0) goto stop_server;
         if (child_pid == 0) {
             (void)signal(SIGTERM, SIG_IGN);
+            (void)signal(SIGHUP, SIG_IGN);
             for (;;) pause();
         }
         memset(&child_spec, 0, sizeof(child_spec));

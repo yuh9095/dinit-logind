@@ -86,6 +86,9 @@ void dl_manager_destroy(dl_manager *manager);
 dl_result dl_session_create(dl_manager *manager, const dl_session_spec *spec,
                             dl_session **out_session);
 dl_result dl_session_close(dl_manager *manager, const char *session_id);
+/* Mark a live session as stopping. Repeated calls are idempotent. */
+dl_result dl_session_begin_stop(dl_manager *manager, const char *session_id);
+bool dl_session_is_stopping(const dl_session *session);
 dl_result dl_session_activate(dl_manager *manager, const char *session_id);
 dl_result dl_session_deactivate(dl_manager *manager, const char *session_id);
 dl_session *dl_session_find(dl_manager *manager, const char *session_id);
