@@ -17,7 +17,7 @@ typedef struct dl_termination_item dl_termination_item;
 typedef struct {
     dl_termination_item *head;
     uint32_t timeout_sec;
-    int (*clock_fn)(clockid_t, struct timespec *);
+    int (*clock_fn)(struct timespec *);
 } dl_termination_queue;
 
 typedef int (*dl_termination_kill_fn)(void *payload);
@@ -26,8 +26,7 @@ typedef void (*dl_termination_release_fn)(void *payload);
 void dl_termination_queue_init(dl_termination_queue *queue,
                                uint32_t timeout_sec);
 void dl_termination_queue_set_clock(dl_termination_queue *queue,
-                                    int (*clock_fn)(clockid_t,
-                                                    struct timespec *));
+                                    int (*clock_fn)(struct timespec *));
 bool dl_termination_queue_contains(const dl_termination_queue *queue,
                                    const char *session_id);
 /* On success, the queue takes ownership of payload. On failure, caller
