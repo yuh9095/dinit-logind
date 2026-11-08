@@ -144,13 +144,15 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
             }
         }
         if (r == 0) {
-            int signal_result = dl_linux_cgroup_v2_session_signal_all(
-                payload, SIGTERM);
             r = dl_termination_queue_schedule(
                 &ctx->terminations, pending->session_id, payload,
                 termination_cgroup_kill, termination_cgroup_release);
             if (r == 0) {
+                dl_linux_cgroup_v2_session *queued_payload = payload;
+                int signal_result;
                 payload = NULL;
+                signal_result = dl_linux_cgroup_v2_session_signal_all(
+                    queued_payload, SIGTERM);
                 if (signal_result < 0) {
                     fprintf(stderr,
                         "dinit-logind: initial SIGTERM for session %s failed (%d); "

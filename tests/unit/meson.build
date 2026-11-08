@@ -69,7 +69,7 @@ dbus_integration_test = executable(
   'test_dbus_integration.c',
   include_directories: include_directories('../../src/core', '../../src/dbus'),
   dependencies: [libsystemd_dep, threads_dep],
-  link_with: [dbus_test_lib, core_lib, linux_identity_lib],
+  link_with: [dbus_test_lib, core_lib, linux_identity_lib, linux_cgroup_v2_lib, termination_lib],
   install: false,
 )
 test('D-Bus login1 object lifecycle and properties',

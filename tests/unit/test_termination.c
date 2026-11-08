@@ -56,6 +56,20 @@ static void test_deadline_and_expiry(void)
     assert(!dl_termination_queue_contains(&q, "s1"));
 }
 
+static void test_schedule_clock_failure_keeps_ownership(void)
+{
+    dl_termination_queue q;
+    struct fake_payload p = {0};
+    dl_termination_queue_init(&q, 1);
+    dl_termination_queue_set_clock(&q, fake_clock);
+    clock_error = EIO;
+    assert(dl_termination_queue_schedule(&q, "schedule-fail", &p,
+                                         fake_kill, fake_release) == -EIO);
+    assert(!dl_termination_queue_contains(&q, "schedule-fail"));
+    assert(p.kills == 0 && p.releases == 0);
+    clock_error = 0;
+}
+
 static void test_clock_failure_postpones(void)
 {
     dl_termination_queue q;
@@ -113,6 +127,7 @@ static void test_shutdown_finishes_all(void)
 int main(void)
 {
     test_deadline_and_expiry();
+    test_schedule_clock_failure_keeps_ownership();
     test_clock_failure_postpones();
     test_retry_and_duplicate();
     test_shutdown_finishes_all();

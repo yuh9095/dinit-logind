@@ -64,8 +64,12 @@ int dl_termination_queue_schedule(dl_termination_queue *queue,
     id_len = strlen(session_id);
     if (id_len == 0 || id_len >= sizeof(item->session_id)) return -EINVAL;
     if (!queue->clock_fn) queue->clock_fn = default_clock;
-    if (queue->clock_fn(CLOCK_MONOTONIC, &now) != 0) return -errno;
-    if (now.tv_nsec < 0 || now.tv_nsec >= 1000000000L) return -EINVAL;
+    if (queue->clock_fn(CLOCK_MONOTONIC, &now) != 0)
+        return errno ? -errno : -EIO;
+    if (now.tv_sec < 0 || now.tv_nsec < 0 ||
+        now.tv_nsec >= 1000000000L) return -EINVAL;
+    if ((uintmax_t)now.tv_sec > (uintmax_t)INTMAX_MAX -
+                                queue->timeout_sec) return -EOVERFLOW;
     item = calloc(1, sizeof(*item));
     if (!item) return -ENOMEM;
     memcpy(item->session_id, session_id, id_len + 1);
@@ -98,7 +102,7 @@ int dl_termination_queue_process(dl_termination_queue *queue)
     if (!queue->head) return 0;
     if (!queue->clock_fn) queue->clock_fn = default_clock;
     if (queue->clock_fn(CLOCK_MONOTONIC, &now) != 0) {
-        int saved = errno;
+        int saved = errno ? errno : EIO;
         dl_termination_item *item;
         for (item = queue->head; item; item = item->next) {
             if (!item->warned) {
