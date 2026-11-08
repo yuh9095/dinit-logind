@@ -58,6 +58,7 @@ struct dbus_context {
     sd_bus *bus;
     struct pending_authorization *pending;
     struct pending_termination *terminations;
+    uint32_t terminate_timeout_sec;
 };
 
 static int session_from_message(sd_bus_message *m, struct dbus_context *ctx,
@@ -159,7 +160,7 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
             r = -errno;
         if (r == 0) {
             int signal_result;
-            termination->deadline.tv_sec += DL_SESSION_TERMINATE_TIMEOUT_SEC;
+            termination->deadline.tv_sec += ctx->terminate_timeout_sec;
             (void)snprintf(termination->session_id,
                            sizeof(termination->session_id), "%s",
                            pending->session_id);
@@ -335,16 +336,28 @@ static int pending_termination_process(struct dbus_context *ctx)
 {
     struct pending_termination **link;
     struct timespec now;
-    bool have_time = clock_gettime(CLOCK_MONOTONIC, &now) == 0;
     if (!ctx) return -EINVAL;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        int saved = errno;
+        struct pending_termination *p;
+        for (p = ctx->terminations; p; p = p->next) {
+            if (!p->warned) {
+                fprintf(stderr,
+                    "dinit-logind: monotonic clock unavailable; postponing "
+                    "SIGKILL for session %s (%s)\\n",
+                    p->session_id, strerror(saved));
+                p->warned = true;
+            }
+        }
+        return 0;
+    }
 
     for (link = &ctx->terminations; *link;) {
         struct pending_termination *p = *link;
         int r;
-        if (have_time &&
-            (now.tv_sec < p->deadline.tv_sec ||
-             (now.tv_sec == p->deadline.tv_sec &&
-              now.tv_nsec < p->deadline.tv_nsec))) {
+        if (now.tv_sec < p->deadline.tv_sec ||
+            (now.tv_sec == p->deadline.tv_sec &&
+             now.tv_nsec < p->deadline.tv_nsec)) {
             link = &p->next;
             continue;
         }
@@ -1076,6 +1089,7 @@ static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
     ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return -ENOMEM;
     ctx->manager = manager;
+    ctx->terminate_timeout_sec = 90;
     dbus->manager = manager;
     dbus->event_cursor = dl_manager_event_generation(manager);
     if (address) {
@@ -1302,6 +1316,19 @@ int dl_dbus_get_events(const dl_dbus *dbus)
 {
     if (!dbus || !dbus->bus) return -EINVAL;
     return sd_bus_get_events(dbus->bus);
+}
+
+int dl_dbus_set_terminate_timeout(dl_dbus *dbus,
+                                  uint32_t timeout_sec)
+{
+    struct dbus_context *ctx;
+    if (!dbus || !dbus->manager_slot || timeout_sec < 1 ||
+        timeout_sec > 86400)
+        return -EINVAL;
+    ctx = sd_bus_slot_get_userdata(dbus->manager_slot);
+    if (!ctx) return -EINVAL;
+    ctx->terminate_timeout_sec = timeout_sec;
+    return 0;
 }
 
 int dl_dbus_process(dl_dbus *dbus)
