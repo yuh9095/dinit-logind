@@ -5,6 +5,7 @@
 #include "dbus.h"
 #include "../platform/linux/process_identity.h"
 #include "../platform/linux/cgroup_v2.h"
+#include "../session/termination.h"
 #include <signal.h>
 #include <errno.h>
 #include <pwd.h>
@@ -41,28 +42,16 @@ struct pending_authorization {
     struct pending_authorization *next;
 };
 
-struct pending_termination {
-    dl_linux_cgroup_v2_session cgroup;
-    struct timespec deadline;
-    char session_id[DL_SESSION_ID_MAX];
-    bool warned;
-    struct pending_termination *next;
-};
-
 struct dbus_context {
     dl_manager *manager;
     sd_bus *bus;
     struct pending_authorization *pending;
-    struct pending_termination *terminations;
+    dl_termination_queue terminations;
     uint32_t terminate_timeout_sec;
 };
 
 static int session_from_message(sd_bus_message *m, struct dbus_context *ctx,
                                 dl_session **ret_session);
-
-static struct pending_termination *pending_termination_find(
-    struct dbus_context *ctx, const char *session_id);
-static void pending_termination_release(struct pending_termination *pending);
 
 static void pending_authorization_remove(struct pending_authorization *pending)
 {
@@ -127,10 +116,11 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
     case SESSION_OP_TERMINATE: {
         dl_linux_cgroup_v2 parent = {-1, {0}};
         dl_linux_cgroup_v2_session cgroup_session = {-1, -1, {0}};
-        struct pending_termination *termination = NULL;
+        dl_linux_cgroup_v2_session *payload = NULL;
         dl_process_identity leader = dl_session_leader(session);
 
-        if (pending_termination_find(ctx, pending->session_id)) {
+        if (dl_termination_queue_contains(&ctx->terminations,
+                                         pending->session_id)) {
             r = 0;
             break;
         }
@@ -144,42 +134,33 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
         if (r == 0)
             r = dl_linux_cgroup_v2_session_kill_all_available(&cgroup_session);
         if (r == 0) {
-            termination = calloc(1, sizeof(*termination));
-            if (!termination) r = -ENOMEM;
+            payload = malloc(sizeof(*payload));
+            if (!payload) r = -ENOMEM;
             else {
-                termination->cgroup.fd = -1;
-                termination->cgroup.parent_fd = -1;
+                *payload = cgroup_session;
+                cgroup_session.fd = -1;
+                cgroup_session.parent_fd = -1;
+                cgroup_session.name[0] = '\\0';
             }
         }
-        if (r == 0 && clock_gettime(CLOCK_MONOTONIC,
-                                    &termination->deadline) != 0)
-            r = -errno;
         if (r == 0) {
-            int signal_result;
-            termination->deadline.tv_sec += ctx->terminate_timeout_sec;
-            (void)snprintf(termination->session_id,
-                           sizeof(termination->session_id), "%s",
-                           pending->session_id);
-            signal_result = dl_linux_cgroup_v2_session_signal_all(
-                &cgroup_session, SIGTERM);
-            if (signal_result < 0) {
-                /* Signaling may have made partial progress. Keep the final
-                 * cgroup.kill scheduled even though the method reports error. */
-                fprintf(stderr,
-                    "dinit-logind: initial SIGTERM for session %s failed (%d); "
-                    "retaining deferred SIGKILL\n",
-                    pending->session_id, signal_result);
-                r = signal_result;
+            int signal_result = dl_linux_cgroup_v2_session_signal_all(
+                payload, SIGTERM);
+            r = dl_termination_queue_schedule(
+                &ctx->terminations, pending->session_id, payload,
+                termination_cgroup_kill, termination_cgroup_release);
+            if (r == 0) {
+                payload = NULL;
+                if (signal_result < 0) {
+                    fprintf(stderr,
+                        "dinit-logind: initial SIGTERM for session %s failed (%d); "
+                        "retaining deferred SIGKILL\\n",
+                        pending->session_id, signal_result);
+                    r = signal_result;
+                }
             }
-            termination->cgroup = cgroup_session;
-            cgroup_session.fd = -1;
-            cgroup_session.parent_fd = -1;
-            termination->cgroup.name[0] = '\0';
-            termination->next = ctx->terminations;
-            ctx->terminations = termination;
-            termination = NULL;
         }
-        pending_termination_release(termination);
+        if (payload) termination_cgroup_release(payload);
         dl_linux_cgroup_v2_session_release(&cgroup_session);
         dl_linux_cgroup_v2_close(&parent);
         if (r == -ENOENT || r == -ENODEV || r == -EACCES ||
@@ -311,82 +292,18 @@ static void pending_authorizations_cancel(struct dbus_context *ctx)
     }
 }
 
-static struct pending_termination *pending_termination_find(
-    struct dbus_context *ctx, const char *session_id)
+static int termination_cgroup_kill(void *payload)
 {
-    struct pending_termination *p;
-    for (p = ctx ? ctx->terminations : NULL; p; p = p->next)
-        if (strcmp(p->session_id, session_id) == 0)
-            return p;
-    return NULL;
+    return dl_linux_cgroup_v2_session_kill_all(
+        (const dl_linux_cgroup_v2_session *)payload);
 }
 
-static void pending_termination_release(struct pending_termination *p)
+static void termination_cgroup_release(void *payload)
 {
-    if (!p) return;
-    dl_linux_cgroup_v2_session_release(&p->cgroup);
-    free(p);
-}
-
-static int pending_termination_process(struct dbus_context *ctx)
-{
-    struct pending_termination **link;
-    struct timespec now;
-    if (!ctx) return -EINVAL;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
-        int saved = errno;
-        struct pending_termination *p;
-        for (p = ctx->terminations; p; p = p->next) {
-            if (!p->warned) {
-                fprintf(stderr,
-                    "dinit-logind: monotonic clock unavailable; postponing "
-                    "SIGKILL for session %s (%s)\n",
-                    p->session_id, strerror(saved));
-                p->warned = true;
-            }
-        }
-        return 0;
-    }
-
-    for (link = &ctx->terminations; *link;) {
-        struct pending_termination *p = *link;
-        int r;
-        if (now.tv_sec < p->deadline.tv_sec ||
-            (now.tv_sec == p->deadline.tv_sec &&
-             now.tv_nsec < p->deadline.tv_nsec)) {
-            link = &p->next;
-            continue;
-        }
-        r = dl_linux_cgroup_v2_session_kill_all(&p->cgroup);
-        /* The daemon cgroup reaper only removes an empty cgroup. */
-        if (r == 0 || r == -ENOENT) {
-            *link = p->next;
-            pending_termination_release(p);
-            continue;
-        }
-        if (!p->warned) {
-            fprintf(stderr,
-                "dinit-logind: deferred SIGKILL for session %s failed (%d); retrying\n",
-                p->session_id, r);
-            p->warned = true;
-        }
-        link = &p->next;
-    }
-    return 0;
-}
-
-static void pending_terminations_finish(struct dbus_context *ctx)
-{
-    while (ctx && ctx->terminations) {
-        struct pending_termination *p = ctx->terminations;
-        int r = dl_linux_cgroup_v2_session_kill_all(&p->cgroup);
-        if (r < 0 && r != -ENOENT)
-            fprintf(stderr,
-                "dinit-logind: final SIGKILL for session %s failed (%d) during shutdown\n",
-                p->session_id, r);
-        ctx->terminations = p->next;
-        pending_termination_release(p);
-    }
+    dl_linux_cgroup_v2_session *session = payload;
+    if (!session) return;
+    dl_linux_cgroup_v2_session_release(session);
+    free(session);
 }
 
 static int make_object_path(const char *kind, const char *id,
@@ -1086,6 +1003,7 @@ static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
     if (!ctx) return -ENOMEM;
     ctx->manager = manager;
     ctx->terminate_timeout_sec = 90;
+    dl_termination_queue_init(&ctx->terminations, 90);
     dbus->manager = manager;
     dbus->event_cursor = dl_manager_event_generation(manager);
     if (address) {
@@ -1324,6 +1242,7 @@ int dl_dbus_set_terminate_timeout(dl_dbus *dbus,
     ctx = sd_bus_slot_get_userdata(dbus->manager_slot);
     if (!ctx) return -EINVAL;
     ctx->terminate_timeout_sec = timeout_sec;
+    ctx->terminations.timeout_sec = timeout_sec;
     return 0;
 }
 
@@ -1340,7 +1259,7 @@ int dl_dbus_process(dl_dbus *dbus)
     if (r < 0) return r;
     ctx = dbus->manager_slot ?
           sd_bus_slot_get_userdata(dbus->manager_slot) : NULL;
-    return pending_termination_process(ctx);
+    return ctx ? dl_termination_queue_process(&ctx->terminations) : 0;
 }
 
 void dl_dbus_close(dl_dbus *dbus)
@@ -1348,7 +1267,7 @@ void dl_dbus_close(dl_dbus *dbus)
     struct dbus_context *ctx = NULL;
     if (!dbus) return;
     if (dbus->manager_slot) ctx = sd_bus_slot_get_userdata(dbus->manager_slot);
-    pending_terminations_finish(ctx);
+    if (ctx) dl_termination_queue_finish(&ctx->terminations);
     pending_authorizations_cancel(ctx);
     sd_bus_slot_unref(dbus->seat_slot);
     sd_bus_slot_unref(dbus->user_slot);

@@ -34,7 +34,7 @@ linux_cgroup_v2_lib = static_library(
 dbus_lib = static_library(
   'dinit-logind-dbus',
   'src/dbus/dbus.c',
-  include_directories: include_directories('src/core', 'src/dbus', 'src/platform/linux'),
+  include_directories: include_directories('src/core', 'src/dbus', 'src/platform/linux', 'src/session'),
   dependencies: libsystemd_dep,
   link_with: [core_lib, linux_identity_lib, linux_cgroup_v2_lib],
   install: false,
@@ -76,7 +76,7 @@ linux_pam_ingress_lib = static_library(
   install: false,
 )
 
-runtime_lib = static_library(
+termination_lib = static_library(\n  'dinit-logind-termination',\n  'src/session/termination.c',\n  include_directories: include_directories('src/session'),\n  install: false,\n)\n\nruntime_lib = static_library(
   'dinit-logind-runtime',
   'src/runtime/runtime.c',
   include_directories: include_directories('src/core', 'src/runtime'),
@@ -97,7 +97,7 @@ daemon_exe = executable(
   'src/daemon/runtime_socket.c',
   include_directories: include_directories('src/core', 'src/platform/linux', 'src/daemon', 'src/dbus'),
   dependencies: libsystemd_dep,
-  link_with: [core_lib, dbus_lib, linux_identity_lib, linux_peer_credentials_lib, linux_pam_session_lib, linux_pam_ingress_lib, daemon_config_lib],
+  link_with: [core_lib, dbus_lib, linux_identity_lib, linux_peer_credentials_lib, linux_pam_session_lib, linux_pam_ingress_lib, daemon_config_lib, termination_lib],
   install: true,
   install_dir: get_option('sbindir'),
 )

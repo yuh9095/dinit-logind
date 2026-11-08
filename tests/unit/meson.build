@@ -52,7 +52,7 @@ daemon_config_test = executable(
 )
 test('daemon configuration ownership and parsing', daemon_config_test)
 
-runtime_test = executable(
+termination_test = executable(\n  'test-termination',\n  'test_termination.c',\n  include_directories: include_directories('../../src/session'),\n  link_with: termination_lib,\n  install: false,\n)\ntest('asynchronous session termination scheduler', termination_test)\n\nruntime_test = executable(
   'test-runtime',
   'test_runtime.c',
   include_directories: include_directories('../../src/core', '../../src/runtime'),
