@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>dinit-logind</vendor>
+  <vendor_url>https://github.com/yuh9095/dinit-logind</vendor_url>
+  <action id="org.freedesktop.login1.set-user-linger">
+    <description>Enable or disable lingering for a user</description>
+    <message>Authentication is required to change user lingering</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+</policyconfig>
