@@ -461,18 +461,30 @@ static void inhibitor_remove(struct dbus_context *ctx,
 
 /* The client owns the read end of a pipe; the daemon retains the write end.
  * POLLERR on the write end means every client copy of the inhibitor FD closed. */
+static void inhibitors_emit_changed(struct dbus_context *ctx)
+{
+    if (!ctx || !ctx->bus) return;
+    (void)sd_bus_emit_properties_changed(ctx->bus, DL_LOGIN1_PATH,
+        DL_LOGIN1_IFACE, "NCurrentInhibitors", "BlockInhibited",
+        "DelayInhibited", NULL);
+}
+
 static void inhibitors_reap(struct dbus_context *ctx)
 {
     struct inhibitor_record **link;
+    bool changed = false;
     if (!ctx) return;
     for (link = &ctx->inhibitors; *link;) {
         struct pollfd pfd = { .fd = (*link)->write_fd, .events = POLLERR | POLLHUP };
         int r = poll(&pfd, 1, 0);
-        if (r > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)))
+        if (r > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
             inhibitor_remove(ctx, link);
+            changed = true;
+        }
         else
             link = &(*link)->next;
     }
+    if (changed) inhibitors_emit_changed(ctx);
 }
 
 static int method_inhibit(sd_bus_message *m, void *userdata,
@@ -539,6 +551,7 @@ static int method_inhibit(sd_bus_message *m, void *userdata,
     }
     record->next = ctx->inhibitors;
     ctx->inhibitors = record;
+    inhibitors_emit_changed(ctx);
     return r;
 }
 
@@ -1193,8 +1206,97 @@ static int fallback_object_find(sd_bus *bus, const char *path,
     return r < 0 ? r : 0;
 }
 
+static bool inhibitor_has_token(const char *what, const char *token,
+                                size_t token_len)
+{
+    const char *p = what;
+    while (p && *p) {
+        const char *end = strchr(p, ':');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len == token_len && memcmp(p, token, len) == 0) return true;
+        if (!end) break;
+        p = end + 1;
+    }
+    return false;
+}
+
+static int manager_property(sd_bus *bus, const char *path,
+                            const char *interface, const char *property,
+                            sd_bus_message *reply, void *userdata,
+                            sd_bus_error *error)
+{
+    struct dbus_context *ctx = userdata;
+    struct inhibitor_record *record;
+    char value[4096];
+    size_t used = 0;
+    uint64_t count = 0;
+    bool delay;
+    (void)bus;
+    (void)interface;
+
+    if (!path || strcmp(path, DL_LOGIN1_PATH) != 0)
+        return property_unknown(error, property);
+    inhibitors_reap(ctx);
+    if (strcmp(property, "NCurrentInhibitors") == 0) {
+        for (record = ctx->inhibitors; record; record = record->next) ++count;
+        return sd_bus_message_append(reply, "t", count);
+    }
+    if (strcmp(property, "InhibitDelayMaxUSec") == 0)
+        return sd_bus_message_append(reply, "t", (uint64_t)5000000);
+    if (strcmp(property, "BlockInhibited") != 0 &&
+        strcmp(property, "DelayInhibited") != 0)
+        return property_unknown(error, property);
+
+    delay = strcmp(property, "DelayInhibited") == 0;
+    value[0] = '\0';
+    for (record = ctx->inhibitors; record; record = record->next) {
+        const char *p = record->what;
+        if ((strcmp(record->mode, "delay") == 0) != delay) continue;
+        while (p && *p) {
+            const char *end = strchr(p, ':');
+            size_t len = end ? (size_t)(end - p) : strlen(p);
+            bool duplicate = false;
+            struct inhibitor_record *prior;
+            const char *q;
+            if (len == 0) { p = end ? end + 1 : NULL; continue; }
+            for (prior = ctx->inhibitors; prior && prior != record;
+                 prior = prior->next) {
+                if ((strcmp(prior->mode, "delay") == 0) != delay) continue;
+                if (inhibitor_has_token(prior->what, p, len)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            /* Avoid repeating an earlier token in this same record. */
+            q = record->what;
+            while (!duplicate && q < p) {
+                const char *qend = strchr(q, ':');
+                size_t qlen = qend ? (size_t)(qend - q) : strlen(q);
+                if (qlen == len && memcmp(q, p, len) == 0)
+                    duplicate = true;
+                if (!qend || qend >= p) break;
+                q = qend + 1;
+            }
+            if (!duplicate) {
+                if (used && used + 1 < sizeof(value)) value[used++] = ':';
+                if (len >= sizeof(value) - used) return -ENOBUFS;
+                memcpy(value + used, p, len);
+                used += len;
+                value[used] = '\0';
+            }
+            if (!end) break;
+            p = end + 1;
+        }
+    }
+    return sd_bus_message_append(reply, "s", value);
+}
+
 static const sd_bus_vtable manager_vtable[] = {
     SD_BUS_VTABLE_START(0),
+    SD_BUS_PROPERTY("BlockInhibited", "s", manager_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("DelayInhibited", "s", manager_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("NCurrentInhibitors", "t", manager_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("InhibitDelayMaxUSec", "t", manager_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
     SD_BUS_METHOD("GetSession", "s", "o", method_get_session, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("GetSessionByPID", "u", "o", method_get_session_by_pid, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("GetUser", "u", "o", method_get_user, SD_BUS_VTABLE_UNPRIVILEGED),
