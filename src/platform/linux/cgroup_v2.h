@@ -5,6 +5,7 @@
 #define DINIT_LOGIND_LINUX_CGROUP_V2_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/types.h>
 #include "process_identity.h"
 
@@ -52,6 +53,14 @@ int dl_linux_cgroup_v2_session_create(
 int dl_linux_cgroup_v2_session_open(
     const dl_linux_cgroup_v2 *parent, const char *session_id,
     const dl_process_identity *leader, dl_linux_cgroup_v2_session *session);
+
+/* Reopen a journaled child only when both parent and child filesystem
+ * identities still match. The child name is treated as one safe component. */
+int dl_linux_cgroup_v2_session_open_recovery(
+    const dl_linux_cgroup_v2 *parent, const char *name,
+    uint64_t expected_parent_dev, uint64_t expected_parent_ino,
+    uint64_t expected_child_dev, uint64_t expected_child_ino,
+    dl_linux_cgroup_v2_session *session);
 
 /* Close handles without removing the cgroup (used when still populated). */
 void dl_linux_cgroup_v2_session_release(dl_linux_cgroup_v2_session *session);

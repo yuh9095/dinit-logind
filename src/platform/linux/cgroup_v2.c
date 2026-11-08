@@ -413,6 +413,84 @@ int dl_linux_cgroup_v2_session_open(
     return -ENOENT;
 }
 
+int dl_linux_cgroup_v2_session_open_recovery(
+    const dl_linux_cgroup_v2 *parent, const char *name,
+    uint64_t expected_parent_dev, uint64_t expected_parent_ino,
+    uint64_t expected_child_dev, uint64_t expected_child_ino,
+    dl_linux_cgroup_v2_session *session)
+{
+    struct stat parent_st, child_st;
+    size_t i, length;
+    int parent_fd = -1, child_fd = -1, kill_fd = -1, result = -EINVAL;
+
+    if (session) {
+        session->parent_fd = -1;
+        session->fd = -1;
+        session->name[0] = '\0';
+    }
+    if (!parent || parent->fd < 0 || !name || !session)
+        return -EINVAL;
+    length = strnlen(name, sizeof(session->name));
+    if (length == 0 || length >= sizeof(session->name) ||
+        (length == 1 && name[0] == '.') ||
+        (length == 2 && name[0] == '.' && name[1] == '.'))
+        return -EINVAL;
+    for (i = 0; i < length; ++i) {
+        unsigned char ch = (unsigned char)name[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+              (ch >= '0' && ch <= '9') || ch == '_' || ch == '-'))
+            return -EINVAL;
+    }
+    result = verify_cgroup2_fd(parent->fd);
+    if (result != 0) return result;
+    if (fstat(parent->fd, &parent_st) != 0) return -errno;
+    if ((uint64_t)parent_st.st_dev != expected_parent_dev ||
+        (uint64_t)parent_st.st_ino != expected_parent_ino)
+        return -EXDEV;
+
+    child_fd = openat(parent->fd, name,
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (child_fd < 0) return -errno;
+    result = verify_cgroup2_fd(child_fd);
+    if (result != 0) goto fail;
+    if (fstat(child_fd, &child_st) != 0) {
+        result = -errno;
+        goto fail;
+    }
+    if ((uint64_t)child_st.st_dev != expected_child_dev ||
+        (uint64_t)child_st.st_ino != expected_child_ino) {
+        result = -ESTALE;
+        goto fail;
+    }
+    kill_fd = openat(child_fd, "cgroup.kill",
+                     O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (kill_fd < 0) {
+        result = errno == ENOENT ? -ENOTSUP : -errno;
+        goto fail;
+    }
+    if (close(kill_fd) != 0) {
+        result = -errno;
+        kill_fd = -1;
+        goto fail;
+    }
+    kill_fd = -1;
+    parent_fd = fcntl(parent->fd, F_DUPFD_CLOEXEC, 0);
+    if (parent_fd < 0) {
+        result = -errno;
+        goto fail;
+    }
+    session->parent_fd = parent_fd;
+    session->fd = child_fd;
+    memcpy(session->name, name, length + 1);
+    return 0;
+
+fail:
+    if (kill_fd >= 0) (void)close(kill_fd);
+    if (parent_fd >= 0) (void)close(parent_fd);
+    if (child_fd >= 0) (void)close(child_fd);
+    return result;
+}
+
 void dl_linux_cgroup_v2_session_release(dl_linux_cgroup_v2_session *session)
 {
     if (session == NULL) return;
