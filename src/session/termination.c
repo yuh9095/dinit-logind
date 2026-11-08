@@ -18,9 +18,9 @@ struct dl_termination_item {
     struct dl_termination_item *next;
 };
 
-static int default_clock(clockid_t clock_id, struct timespec *now)
+static int default_clock(struct timespec *now)
 {
-    return clock_gettime(clock_id, now);
+    return clock_gettime(CLOCK_MONOTONIC, now);
 }
 
 void dl_termination_queue_init(dl_termination_queue *queue,
@@ -33,8 +33,7 @@ void dl_termination_queue_init(dl_termination_queue *queue,
 }
 
 void dl_termination_queue_set_clock(dl_termination_queue *queue,
-                                    int (*clock_fn)(clockid_t,
-                                                    struct timespec *))
+                                    int (*clock_fn)(struct timespec *))
 {
     if (queue) queue->clock_fn = clock_fn ? clock_fn : default_clock;
 }
@@ -64,7 +63,7 @@ int dl_termination_queue_schedule(dl_termination_queue *queue,
     id_len = strlen(session_id);
     if (id_len == 0 || id_len >= sizeof(item->session_id)) return -EINVAL;
     if (!queue->clock_fn) queue->clock_fn = default_clock;
-    if (queue->clock_fn(CLOCK_MONOTONIC, &now) != 0)
+    if (queue->clock_fn(&now) != 0)
         return errno ? -errno : -EIO;
     if (now.tv_sec < 0 || now.tv_nsec < 0 ||
         now.tv_nsec >= 1000000000L) return -EINVAL;
