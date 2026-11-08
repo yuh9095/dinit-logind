@@ -5,6 +5,7 @@
 #define DINIT_LOGIND_LINUX_CGROUP_V2_H
 
 #include <stddef.h>
+#include <sys/types.h>
 #include "process_identity.h"
 
 #ifdef __cplusplus
@@ -21,6 +22,14 @@ typedef struct {
     int fd;
     char name[96];
 } dl_linux_cgroup_v2_session;
+
+/* Narrow I/O seam for deterministic cgroup.kill error and retry tests. */
+typedef struct {
+    int (*open_kill)(int dirfd, int flags, void *userdata);
+    ssize_t (*write_kill)(int fd, const void *buffer, size_t size, void *userdata);
+    int (*close_fd)(int fd, void *userdata);
+    void *userdata;
+} dl_linux_cgroup_v2_kill_io;
 
 /* Parse the unified 0:: entry from /proc/self/cgroup. Root and unsafe paths
  * are rejected because sessions must live below a dedicated service cgroup. */
@@ -67,6 +76,9 @@ int dl_linux_cgroup_v2_session_kill_all_available(
 /* cgroup.kill is required; missing support returns -ENOTSUP. */
 int dl_linux_cgroup_v2_session_kill_all(
     const dl_linux_cgroup_v2_session *session);
+int dl_linux_cgroup_v2_session_kill_all_with_io(
+    const dl_linux_cgroup_v2_session *session,
+    const dl_linux_cgroup_v2_kill_io *io);
 
 /* Removes only the exact child created by session_create. If it is still
  * populated, returns -EBUSY and retains the handles for a later retry. */

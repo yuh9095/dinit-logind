@@ -61,6 +61,15 @@ termination_test = executable(
 )
 test('asynchronous session termination scheduler', termination_test)
 
+termination_cgroup_test = executable(
+  'test-termination-cgroup',
+  'test_termination_cgroup.c',
+  include_directories: include_directories('../../src/core', '../../src/platform/linux', '../../src/session'),
+  link_with: [linux_identity_lib, linux_cgroup_v2_lib, termination_lib],
+  install: false,
+)
+test('cgroup.kill adapter errors and termination retry', termination_cgroup_test)
+
 runtime_test = executable(
   'test-runtime',
   'test_runtime.c',

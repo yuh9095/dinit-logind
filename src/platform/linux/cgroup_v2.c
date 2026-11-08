@@ -423,35 +423,68 @@ void dl_linux_cgroup_v2_session_release(dl_linux_cgroup_v2_session *session)
     session->name[0] = '\0';
 }
 
+static int default_kill_open(int dirfd, int flags, void *userdata)
+{
+    (void)userdata;
+    return openat(dirfd, "cgroup.kill", flags);
+}
+
+static ssize_t default_kill_write(int fd, const void *buffer, size_t size,
+                                  void *userdata)
+{
+    (void)userdata;
+    return write(fd, buffer, size);
+}
+
+static int default_kill_close(int fd, void *userdata)
+{
+    (void)userdata;
+    return close(fd);
+}
+
+static const dl_linux_cgroup_v2_kill_io default_kill_io = {
+    default_kill_open, default_kill_write, default_kill_close, NULL
+};
+
 int dl_linux_cgroup_v2_session_kill_all_available(
     const dl_linux_cgroup_v2_session *session)
 {
     int fd;
     if (session == NULL || session->fd < 0) return -EINVAL;
-    fd = openat(session->fd, "cgroup.kill",
-                O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    fd = default_kill_io.open_kill(session->fd,
+        O_WRONLY | O_CLOEXEC | O_NOFOLLOW, NULL);
     if (fd < 0) return errno == ENOENT ? -ENOTSUP : -errno;
-    (void)close(fd);
+    (void)default_kill_io.close_fd(fd, NULL);
     return 0;
 }
 
-int dl_linux_cgroup_v2_session_kill_all(
-    const dl_linux_cgroup_v2_session *session)
+int dl_linux_cgroup_v2_session_kill_all_with_io(
+    const dl_linux_cgroup_v2_session *session,
+    const dl_linux_cgroup_v2_kill_io *io)
 {
     int fd, result = 0;
-    if (session == NULL || session->fd < 0) return -EINVAL;
-    fd = openat(session->fd, "cgroup.kill",
-                O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (session == NULL || session->fd < 0 || io == NULL ||
+        io->open_kill == NULL || io->write_kill == NULL ||
+        io->close_fd == NULL)
+        return -EINVAL;
+    fd = io->open_kill(session->fd,
+        O_WRONLY | O_CLOEXEC | O_NOFOLLOW, io->userdata);
     if (fd < 0) return errno == ENOENT ? -ENOTSUP : -errno;
     for (;;) {
-        ssize_t written = write(fd, "1", 1);
+        ssize_t written = io->write_kill(fd, "1", 1, io->userdata);
         if (written == 1) break;
         if (written < 0 && errno == EINTR) continue;
         result = written < 0 ? -errno : -EIO;
         break;
     }
-    (void)close(fd);
+    (void)io->close_fd(fd, io->userdata);
     return result;
+}
+
+int dl_linux_cgroup_v2_session_kill_all(
+    const dl_linux_cgroup_v2_session *session)
+{
+    return dl_linux_cgroup_v2_session_kill_all_with_io(session, &default_kill_io);
 }
 
 
