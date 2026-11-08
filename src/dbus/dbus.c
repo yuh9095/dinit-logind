@@ -342,6 +342,9 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
         r = sd_bus_emit_signal(ctx->bus, sd_bus_message_get_path(pending->request),
                                "org.freedesktop.login1.Session", member, "");
         break;
+    case SESSION_OP_SET_USER_LINGER:
+        r = -EINVAL; /* Handled before resolving a session object. */
+        break;
     }
 
     if (r < 0) {
