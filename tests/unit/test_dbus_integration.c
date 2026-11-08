@@ -524,6 +524,19 @@ int main(void)
         sd_bus_message_unref(reply);
         reply = NULL;
 
+        {
+            char *capability = NULL;
+            r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
+                "CanPowerOff", &error, &reply, "");
+            if (r < 0 || sd_bus_message_read(reply, "s", &capability) < 0 ||
+                strcmp(capability, "na") != 0) {
+                stage = 1226;
+                goto stop_server;
+            }
+            sd_bus_message_unref(reply);
+            reply = NULL;
+        }
+
         /* Root linger is deliberately rejected before contacting Polkit. */
         r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
             "SetUserLinger", &error, &reply, "ubb", 0u, 1, 0);
