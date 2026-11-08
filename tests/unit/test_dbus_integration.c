@@ -470,6 +470,16 @@ int main(void)
         sd_bus_error_free(&error);
         sd_bus_message_unref(reply);
         reply = NULL;
+
+        r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
+            "Inhibit", &error, &reply, "ssss",
+            "sleep", "dinit-logind-test", "delay not yet coordinated", "delay");
+        if (r >= 0 || !sd_bus_error_has_name(&error,
+                "org.freedesktop.DBus.Error.NotSupported"))
+            goto stop_server;
+        sd_bus_error_free(&error);
+        sd_bus_message_unref(reply);
+        reply = NULL;
     }
 
     stage = 13;
