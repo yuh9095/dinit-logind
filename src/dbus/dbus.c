@@ -21,10 +21,6 @@
 #ifndef DL_POLKIT_AUTH_TIMEOUT_USEC
 #define DL_POLKIT_AUTH_TIMEOUT_USEC (30ULL * 1000ULL * 1000ULL)
 #endif
-#ifndef DL_SESSION_TERMINATE_TIMEOUT_SEC
-/* systemd v262.2 default-timeout-sec is 90 seconds. */
-#define DL_SESSION_TERMINATE_TIMEOUT_SEC 90
-#endif
 
 enum session_operation {
     SESSION_OP_ACTIVATE,
@@ -344,7 +340,7 @@ static int pending_termination_process(struct dbus_context *ctx)
             if (!p->warned) {
                 fprintf(stderr,
                     "dinit-logind: monotonic clock unavailable; postponing "
-                    "SIGKILL for session %s (%s)\\n",
+                    "SIGKILL for session %s (%s)\n",
                     p->session_id, strerror(saved));
                 p->warned = true;
             }
