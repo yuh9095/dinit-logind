@@ -29,6 +29,10 @@ This operation does not yet start or stop a per-user Dinit service/supervision t
 
 This is not yet full inhibitor orchestration. Power/sleep actions do not yet emit the prepare signals or consult the block-inhibitor table. Do not advertise these parts as complete until orchestration, delay deadlines, and timeout behavior have tests.
 
+### Power capability queries
+
+The non-privileged `CanPowerOff`, `CanReboot`, `CanSuspend`, `CanHibernate`, `CanHybridSleep`, and `CanSuspendThenHibernate` methods are exported. They return the login1 capability value `na` while no explicit host power backend is configured. This is intentional: the daemon must not claim host power support or invoke host shutdown/reboot from a container without an explicit backend and policy.
+
 ## Manager API inventory
 
 Groups in scope for audit and staged implementation:
