@@ -137,6 +137,7 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
         struct stat parent_st, child_st;
         struct timespec deadline;
         char boot_id[DL_TERMINATION_BOOT_ID_MAX];
+        bool journal_written = false;
 
         if (dl_session_is_stopping(session) ||
             dl_termination_queue_contains(&ctx->terminations,
@@ -182,6 +183,7 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
             record.pid_namespace_inode = leader.pid_namespace_inode;
             /* Durable intent must reach stable storage before signals/ack. */
             r = dl_termination_store_put(&ctx->termination_store, &record);
+            if (r == 0) journal_written = true;
         }
         if (r == 0) {
             payload = calloc(1, sizeof(*payload));
@@ -228,13 +230,16 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
             }
         }
         if (payload) {
+            if (journal_written)
+                (void)dl_termination_store_remove(&ctx->termination_store,
+                                                 pending->session_id);
+            termination_cgroup_release(payload);
+        } else if (journal_written &&
+                   !dl_termination_queue_contains(&ctx->terminations,
+                                                  pending->session_id)) {
+            /* No deferred owner accepted the payload; discard the intent. */
             (void)dl_termination_store_remove(&ctx->termination_store,
                                              pending->session_id);
-            termination_cgroup_release(payload);
-        } else if (r < 0 && dl_termination_queue_contains(
-                       &ctx->terminations, pending->session_id) &&
-                   !dl_session_is_stopping(session)) {
-            /* Queue owns the payload; preserve its durable record. */
         }
         dl_linux_cgroup_v2_session_release(&cgroup_session);
         dl_linux_cgroup_v2_close(&parent);
