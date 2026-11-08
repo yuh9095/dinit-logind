@@ -1776,10 +1776,19 @@ static int process_core_events(dl_dbus *dbus)
         }
         if (result != DL_OK) return -EIO;
         switch (event.type) {
-        case DL_EVENT_USER_ADDED:
+        case DL_EVENT_USER_ADDED: {
+            bool linger = false;
+            /* Rehydrate the persistent policy when the user first appears
+             * after a daemon restart. Missing/unsafe storage is fail-closed. */
+            if (dl_runtime_get_linger(
+                    &(dl_runtime_paths){ .runtime_base = "/run/user",
+                        .linger_directory = "/var/lib/dinit-logind/linger",
+                        .trusted_owner = 0 }, event.uid, &linger) == DL_OK && linger)
+                (void)dl_user_set_linger(dbus->manager, event.uid, true);
             r = emit_manager_object_signal(dbus, "UserNew", "uo", NULL,
                                            event.uid, "user");
             break;
+        }
         case DL_EVENT_SEAT_ADDED:
             r = emit_manager_object_signal(dbus, "SeatNew", "so",
                                            event.seat_id, 0, "seat");
