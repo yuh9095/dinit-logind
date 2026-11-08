@@ -384,7 +384,7 @@ int main(void)
         int inhibitor_fd = -1;
         unsigned int inhibitor_count = 0;
         const char *what, *who, *why, *mode;
-        uint32_t inhibitor_uid;
+        uint32_t inhibitor_uid, inhibitor_pid;
 
         stage = 121;
         r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
@@ -398,20 +398,21 @@ int main(void)
 
         r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
             "ListInhibitors", &error, &reply, "");
-        if (r < 0 || sd_bus_message_enter_container(reply, 'a', "(ssssu)") <= 0)
+        if (r < 0 || sd_bus_message_enter_container(reply, 'a', "(ssssuu)") <= 0)
             goto stop_server;
-        r = sd_bus_message_enter_container(reply, 'r', "ssssu");
-        if (r <= 0 || sd_bus_message_read(reply, "ssssu", &what, &who, &why,
-                                          &mode, &inhibitor_uid) < 0 ||
+        r = sd_bus_message_enter_container(reply, 'r', "ssssuu");
+        if (r <= 0 || sd_bus_message_read(reply, "ssssuu", &what, &who, &why,
+                                          &mode, &inhibitor_uid, &inhibitor_pid) < 0 ||
             strcmp(what, "sleep") != 0 ||
             strcmp(who, "dinit-logind-test") != 0 ||
             strcmp(why, "integration test") != 0 ||
             strcmp(mode, "block") != 0 ||
-            inhibitor_uid != (uint32_t)geteuid())
+            inhibitor_uid != (uint32_t)geteuid() ||
+            inhibitor_pid != (uint32_t)getpid())
             goto stop_server;
         inhibitor_count = 1;
         if (sd_bus_message_exit_container(reply) < 0 ||
-            sd_bus_message_enter_container(reply, 'r', "ssssu") != 0 ||
+            sd_bus_message_enter_container(reply, 'r', "ssssuu") != 0 ||
             sd_bus_message_exit_container(reply) < 0)
             goto stop_server;
         sd_bus_message_unref(reply);
