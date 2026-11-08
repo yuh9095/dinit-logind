@@ -1681,7 +1681,7 @@ static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
     if (geteuid() == 0) {
         r = ensure_linger_directory();
         if (r < 0)
-            fprintf(stderr, "dinit-logind: persistent linger storage unavailable or unsafe (%s)\\n",
+            fprintf(stderr, "dinit-logind: persistent linger storage unavailable or unsafe (%s)\n",
                     strerror(-r));
     }
     r = sd_bus_request_name(dbus->bus, DL_LOGIN1_NAME, 0);
