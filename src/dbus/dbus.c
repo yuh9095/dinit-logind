@@ -544,8 +544,10 @@ static int method_list_inhibitors(sd_bus_message *m, void *userdata,
     struct dbus_context *ctx = userdata;
     struct inhibitor_record *record;
     sd_bus_message *reply = NULL;
-    int r = sd_bus_message_new_method_return(m, &reply);
+    int r;
     (void)error;
+    inhibitors_reap(ctx);
+    r = sd_bus_message_new_method_return(m, &reply);
     if (r < 0) return r;
     r = sd_bus_message_open_container(reply, 'a', "(ssssu)");
     for (record = ctx->inhibitors; r >= 0 && record; record = record->next)
