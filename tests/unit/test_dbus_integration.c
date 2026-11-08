@@ -767,7 +767,7 @@ int main(void)
         } else {
             fprintf(stderr,
                 "Skipping D-Bus shutdown Terminate integration: delegated "
-                "cgroup.kill unavailable (%d)\\n", cr);
+                "cgroup.kill unavailable (%d)\n", cr);
             (void)kill(child_pid, SIGKILL);
             (void)waitpid(child_pid, &child_status, 0);
             child_pid = -1;
@@ -787,8 +787,30 @@ int main(void)
             if (atomic_load(&server.failed)) goto stop_server;
             dl_dbus_close(&dbus);
 
-            if (waitpid(child_pid, &child_status, 0) != child_pid ||
-                !WIFSIGNALED(child_status) || WTERMSIG(child_status) != SIGKILL)
+            /* Bound the wait: if shutdown kill fails, report a test failure
+             * instead of hanging CI; stop_server will reap the child. */
+            {
+                struct timespec deadline, pause_time = {0, 10000000L};
+                if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+                    goto stop_server;
+                deadline.tv_sec += 5;
+                for (;;) {
+                    pid_t waited = waitpid(child_pid, &child_status, WNOHANG);
+                    if (waited == child_pid) break;
+                    if (waited < 0 && errno != EINTR) goto stop_server;
+                    {
+                        struct timespec now;
+                        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+                            goto stop_server;
+                        if (now.tv_sec > deadline.tv_sec ||
+                            (now.tv_sec == deadline.tv_sec &&
+                             now.tv_nsec >= deadline.tv_nsec))
+                            goto stop_server;
+                    }
+                    (void)nanosleep(&pause_time, NULL);
+                }
+            }
+            if (!WIFSIGNALED(child_status) || WTERMSIG(child_status) != SIGKILL)
                 goto stop_server;
             child_pid = -1;
         }
