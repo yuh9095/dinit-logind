@@ -21,6 +21,12 @@ The current implementation provides:
 - A bounded in-memory inhibitor table. Closing the final client copy releases the inhibitor.
 - Delay-mode requests are explicitly rejected with `NotSupported` until transition coordination exists; `InhibitDelayMaxUSec` is therefore zero.
 
+### User linger
+
+The Manager `SetUserLinger(uid, enable, interactive)` method is implemented with a dedicated Polkit action (`org.freedesktop.login1.set-user-linger`). The persistent marker is stored under `/var/lib/dinit-logind/linger` using the runtime module's no-follow, ownership, mode, atomic-write, and fsync checks. The User `Linger` and `State` properties consult the persistent marker so the value survives daemon restarts. Root UID is rejected. If the trusted state directory is missing or unsafe, the operation fails closed.
+
+This operation does not yet start or stop a per-user Dinit service/supervision tree. Linger currently represents the persistent policy bit, not a promise that user services are running.
+
 This is not yet full inhibitor orchestration. Power/sleep actions do not yet emit the prepare signals or consult the block-inhibitor table. Do not advertise these parts as complete until orchestration, delay deadlines, and timeout behavior have tests.
 
 ## Manager API inventory
