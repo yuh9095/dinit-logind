@@ -391,9 +391,17 @@ int main(void)
         r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
             "Inhibit", &error, &reply, "ssss",
             "sleep", "dinit-logind-test", "integration test", "block");
-        if (r < 0 || sd_bus_message_read(reply, "h", &inhibitor_fd) < 0 ||
-            inhibitor_fd < 0)
+        if (r < 0) {
+            fprintf(stderr, "Inhibit call failed: r=%d error=%s: %s\n",
+                    r, error.name ? error.name : "-", error.message ? error.message : "-");
             goto stop_server;
+        }
+        r = sd_bus_message_read(reply, "h", &inhibitor_fd);
+        if (r < 0 || inhibitor_fd < 0) {
+            fprintf(stderr, "Inhibit FD read failed: r=%d fd=%d reply=%p\n",
+                    r, inhibitor_fd, (void *)reply);
+            goto stop_server;
+        }
         /* The descriptor read from an sd-bus message is borrowed from that
          * message; keep our own copy after releasing the reply. */
         inhibitor_fd = fcntl(inhibitor_fd, F_DUPFD_CLOEXEC, 3);
