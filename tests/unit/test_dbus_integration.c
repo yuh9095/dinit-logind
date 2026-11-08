@@ -394,12 +394,14 @@ int main(void)
         if (r < 0) {
             fprintf(stderr, "Inhibit call failed: r=%d error=%s: %s\n",
                     r, error.name ? error.name : "-", error.message ? error.message : "-");
+            stage = 1211;
             goto stop_server;
         }
         r = sd_bus_message_read(reply, "h", &inhibitor_fd);
         if (r < 0 || inhibitor_fd < 0) {
             fprintf(stderr, "Inhibit FD read failed: r=%d fd=%d reply=%p\n",
                     r, inhibitor_fd, (void *)reply);
+            stage = 1212;
             goto stop_server;
         }
         /* The descriptor read from an sd-bus message is borrowed from that
@@ -410,7 +412,8 @@ int main(void)
             if (inhibitor_fd < 0) {
                 fprintf(stderr, "Inhibit FD duplication failed: received=%d errno=%d (%s)\n",
                         received_fd, errno, strerror(errno));
-                goto stop_server;
+                stage = 1213;
+            goto stop_server;
             }
         }
         sd_bus_message_unref(reply);
@@ -419,6 +422,7 @@ int main(void)
         r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
             "ListInhibitors", &error, &reply, "");
         if (r < 0 || sd_bus_message_enter_container(reply, 'a', "(ssssuu)") <= 0)
+            stage = 1214;
             goto stop_server;
         r = sd_bus_message_enter_container(reply, 'r', "ssssuu");
         if (r <= 0 || sd_bus_message_read(reply, "ssssuu", &what, &who, &why,
@@ -429,11 +433,13 @@ int main(void)
             strcmp(mode, "block") != 0 ||
             inhibitor_uid != (uint32_t)geteuid() ||
             inhibitor_pid != (uint32_t)getpid())
+            stage = 1215;
             goto stop_server;
         inhibitor_count = 1;
         if (sd_bus_message_exit_container(reply) < 0 ||
             sd_bus_message_enter_container(reply, 'r', "ssssuu") != 0 ||
             sd_bus_message_exit_container(reply) < 0)
+            stage = 1216;
             goto stop_server;
         sd_bus_message_unref(reply);
         reply = NULL;
@@ -442,15 +448,18 @@ int main(void)
             char *inhibited = NULL;
             r = sd_bus_get_property_trivial(client, LOGIN1_NAME, LOGIN1_PATH,
                 MANAGER_IFACE, "NCurrentInhibitors", &error, 't', &current);
-            if (r < 0 || current != 1) goto stop_server;
+            if (r < 0 || current != 1) stage = 1217;
+            goto stop_server;
             r = sd_bus_get_property_string(client, LOGIN1_NAME, LOGIN1_PATH,
                 MANAGER_IFACE, "BlockInhibited", &error, &inhibited);
             if (r < 0 || !inhibited || strcmp(inhibited, "sleep") != 0)
-                goto stop_server;
+                stage = 1218;
+            goto stop_server;
             free(inhibited);
             inhibited = NULL;
         }
-        if (close(inhibitor_fd) != 0) goto stop_server;
+        if (close(inhibitor_fd) != 0) stage = 1219;
+            goto stop_server;
 
         /* dl_dbus_process reaps the server-side pipe after the client closes
          * its last FD, before answering the next request. */
@@ -460,6 +469,7 @@ int main(void)
             sd_bus_message_enter_container(reply, 'r', "ssssu") != 0 ||
             sd_bus_message_exit_container(reply) < 0 ||
             sd_bus_message_exit_container(reply) < 0 || inhibitor_count != 1)
+            stage = 1220;
             goto stop_server;
         sd_bus_message_unref(reply);
         reply = NULL;
@@ -468,11 +478,13 @@ int main(void)
             char *inhibited = NULL;
             r = sd_bus_get_property_trivial(client, LOGIN1_NAME, LOGIN1_PATH,
                 MANAGER_IFACE, "NCurrentInhibitors", &error, 't', &current);
-            if (r < 0 || current != 0) goto stop_server;
+            if (r < 0 || current != 0) stage = 1221;
+            goto stop_server;
             r = sd_bus_get_property_string(client, LOGIN1_NAME, LOGIN1_PATH,
                 MANAGER_IFACE, "BlockInhibited", &error, &inhibited);
             if (r < 0 || !inhibited || inhibited[0] != '\0')
-                goto stop_server;
+                stage = 1222;
+            goto stop_server;
             free(inhibited);
         }
 
@@ -481,6 +493,7 @@ int main(void)
             "sleep", "dinit-logind-test", "invalid mode", "ignore");
         if (r >= 0 || !sd_bus_error_has_name(&error,
                 "org.freedesktop.DBus.Error.InvalidArgs"))
+            stage = 1223;
             goto stop_server;
         sd_bus_error_free(&error);
         sd_bus_message_unref(reply);
@@ -491,6 +504,7 @@ int main(void)
             "sleep", "dinit-logind-test", "delay not yet coordinated", "delay");
         if (r >= 0 || !sd_bus_error_has_name(&error,
                 "org.freedesktop.DBus.Error.NotSupported"))
+            stage = 1224;
             goto stop_server;
         sd_bus_error_free(&error);
         sd_bus_message_unref(reply);
