@@ -31,7 +31,7 @@ jobs:
           builddir/dinit-logind --help
 
   alpine-musl:
-    name: Alpine musl (${ matrix.arch })
+    name: Alpine musl (${{ matrix.arch }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -53,7 +53,7 @@ jobs:
           platforms: arm,arm64,386
       - name: Build and test inside Alpine musl
         run: |
-          docker run --rm --platform "${ matrix.platform }" \
+          docker run --rm --platform "${{ matrix.platform }}" \
             -v "$PWD:/src" \
             -w /src \
             alpine:3.23 \
@@ -65,11 +65,11 @@ jobs:
               ldd --version 2>&1 | head -n 1
               echo "sd-bus compatibility provider:"
               pkg-config --modversion libsystemd
-              meson setup builddir-${ matrix.arch }
-              meson compile -C builddir-${ matrix.arch }
-              meson test -C builddir-${ matrix.arch } --print-errorlogs
-              builddir-${ matrix.arch }/dinit-logind --version
-              builddir-${ matrix.arch }/dinit-logind --help
+              meson setup builddir-${{ matrix.arch }}
+              meson compile -C builddir-${{ matrix.arch }}
+              meson test -C builddir-${{ matrix.arch }} --print-errorlogs
+              builddir-${{ matrix.arch }}/dinit-logind --version
+              builddir-${{ matrix.arch }}/dinit-logind --help
             '
 
   archlinux:
