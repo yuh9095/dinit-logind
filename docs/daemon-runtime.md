@@ -20,10 +20,12 @@ removes the socket only if its device/inode still match the socket it created.
 
 ## Configuration
 
-The only supported setting is `allowed_peer_uid = 0`. Non-root peer UIDs are rejected: the PAM ingress is a privileged session-creation interface and must only trust root-owned PAM clients. The
-configuration file must be regular, root-owned, and not group/world-writable;
-it is opened with O_NOFOLLOW. Unknown and duplicate settings are errors.
-Do not allow untrusted users to control this value.
+Supported settings:
+
+- `allowed_peer_uid = 0`: non-root peer UIDs are rejected because the PAM ingress is a privileged session-creation interface.
+- `session_terminate_timeout_sec = 90`: grace period between the initial best-effort SIGTERM and final `cgroup.kill`. Valid values are 1 through 86400 seconds. The default 90 seconds matches systemd v262.2's default `DefaultTimeoutStopSec`; administrators may tune it for their environment.
+
+The configuration file must be regular, root-owned, and not group/world-writable; it is opened with O_NOFOLLOW. Unknown, duplicate, and out-of-range settings are errors. Do not allow untrusted users to control these values.
 
 ## Event loop and lifecycle
 
