@@ -186,6 +186,7 @@ int main(void)
     char object_path[256], user_path[256], seat_path[256];
     const char *returned_path = NULL;
     int callback_count = 0, r, result = 1, stage = 0;
+    int server_started = 0;
     int active = 1;
     pid_t child_pid = -1;
     int child_status;
@@ -250,6 +251,7 @@ int main(void)
         pthread_mutex_destroy(&server.lock);
         goto finish;
     }
+    server_started = 1;
 
     spec.uid = (uint32_t)getuid();
     if (dl_linux_process_identity_read((uint32_t)getpid(), &spec.leader) != DL_OK)
@@ -702,6 +704,102 @@ int main(void)
                            "GetSession", &error, &reply, "s", dl_session_id(session));
     if (r >= 0) goto stop_server;
 
+    /*
+     * D-Bus daemon shutdown must synchronously attempt pending session
+     * SIGKILLs. The scheduler unit test covers callback semantics; this
+     * exercises the real D-Bus close path with a daemon-owned cgroup.
+     */
+    {
+        dl_linux_cgroup_v2 parent = {-1, {0}};
+        dl_linux_cgroup_v2_session cgroup_session = {-1, -1, {0}};
+        int cr = -1;
+        int shutdown_test_supported = 0;
+
+        stage = 21;
+        child_pid = fork();
+        if (child_pid < 0) goto stop_server;
+        if (child_pid == 0) {
+            (void)signal(SIGTERM, SIG_IGN);
+            for (;;) pause();
+        }
+        memset(&child_spec, 0, sizeof(child_spec));
+        child_spec.uid = (uint32_t)getuid();
+        if (dl_linux_process_identity_read((uint32_t)child_pid,
+                                           &child_spec.leader) != DL_OK)
+            goto stop_server;
+        child_spec.service = "test-terminate-shutdown";
+        child_spec.type = "tty";
+        child_spec.session_class = "user";
+        pthread_mutex_lock(&server.lock);
+        r = dl_session_create(manager, &child_spec, &child_session);
+        pthread_mutex_unlock(&server.lock);
+        if (r != DL_OK) goto stop_server;
+
+        cr = dl_linux_cgroup_v2_open_current(&parent);
+        if (cr == 0)
+            cr = dl_linux_cgroup_v2_session_create(
+                &parent, dl_session_id(child_session),
+                &child_spec.leader, &cgroup_session);
+        if (cr == 0)
+            cr = dl_linux_cgroup_v2_session_kill_all_available(&cgroup_session);
+        if (cr == 0) {
+            r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH,
+                MANAGER_IFACE, "GetSession", &error, &reply, "s",
+                dl_session_id(child_session));
+            if (r < 0 || sd_bus_message_read(reply, "o", &returned_path) < 0)
+                goto stop_server;
+            (void)snprintf(child_path, sizeof(child_path), "%s", returned_path);
+            sd_bus_message_unref(reply);
+            reply = NULL;
+
+            r = sd_bus_call_method(client, LOGIN1_NAME, child_path,
+                SESSION_IFACE, "Terminate", &error, &reply, "");
+            if (r < 0) goto stop_server;
+            sd_bus_message_unref(reply);
+            reply = NULL;
+
+            pthread_mutex_lock(&server.lock);
+            r = dl_session_close(manager, dl_session_id(child_session));
+            pthread_mutex_unlock(&server.lock);
+            if (r != DL_OK) goto stop_server;
+            child_session = NULL;
+            shutdown_test_supported = 1;
+        } else {
+            fprintf(stderr,
+                "Skipping D-Bus shutdown Terminate integration: delegated "
+                "cgroup.kill unavailable (%d)\\n", cr);
+            (void)kill(child_pid, SIGKILL);
+            (void)waitpid(child_pid, &child_status, 0);
+            child_pid = -1;
+            pthread_mutex_lock(&server.lock);
+            r = dl_session_close(manager, dl_session_id(child_session));
+            pthread_mutex_unlock(&server.lock);
+            if (r != DL_OK) goto stop_server;
+            child_session = NULL;
+        }
+
+        if (shutdown_test_supported) {
+            /* Stop the event loop before close: finish() must not rely on a
+             * future tick and must kill immediately, before the grace period. */
+            atomic_store(&server.stop, true);
+            pthread_join(thread, NULL);
+            server_started = 0;
+            if (atomic_load(&server.failed)) goto stop_server;
+            dl_dbus_close(&dbus);
+
+            if (waitpid(child_pid, &child_status, 0) != child_pid ||
+                !WIFSIGNALED(child_status) || WTERMSIG(child_status) != SIGKILL)
+                goto stop_server;
+            child_pid = -1;
+        }
+
+        if (cgroup_session.fd >= 0) {
+            if (dl_linux_cgroup_v2_session_close(&cgroup_session) != 0)
+                dl_linux_cgroup_v2_session_release(&cgroup_session);
+        }
+        dl_linux_cgroup_v2_close(&parent);
+    }
+
     result = 0;
 
 stop_server:
@@ -713,8 +811,11 @@ stop_server:
         fprintf(stderr, "D-Bus integration failed at stage %d (r=%d, error=%s: %s)\n",
                 stage, r, error.name ? error.name : "-",
                 error.message ? error.message : "-");
-    atomic_store(&server.stop, true);
-    pthread_join(thread, NULL);
+    if (server_started) {
+        atomic_store(&server.stop, true);
+        pthread_join(thread, NULL);
+        server_started = 0;
+    }
     if (atomic_load(&server.failed)) result = 1;
     pthread_mutex_destroy(&server.lock);
 
