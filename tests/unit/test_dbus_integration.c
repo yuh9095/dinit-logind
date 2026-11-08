@@ -456,7 +456,7 @@ int main(void)
             if (r < 0 || current != 0) goto stop_server;
             r = sd_bus_get_property_string(client, LOGIN1_NAME, LOGIN1_PATH,
                 MANAGER_IFACE, "BlockInhibited", &error, &inhibited);
-            if (r < 0 || !inhibited || inhibited[0] != '\\0')
+            if (r < 0 || !inhibited || inhibited[0] != '\0')
                 goto stop_server;
             free(inhibited);
         }
