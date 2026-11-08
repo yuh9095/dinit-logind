@@ -616,6 +616,15 @@ int main(void)
             sd_bus_message_unref(reply);
             reply = NULL;
 
+            /* Repeating Terminate while the first grace-period operation is
+             * pending is idempotent: it must not enqueue a second cgroup kill
+             * or reject the already accepted operation. */
+            r = sd_bus_call_method(client, LOGIN1_NAME, child_path,
+                SESSION_IFACE, "Terminate", &error, &reply, "");
+            if (r < 0) goto stop_server;
+            sd_bus_message_unref(reply);
+            reply = NULL;
+
             /* The pending operation must survive core Session teardown. */
             pthread_mutex_lock(&server.lock);
             r = dl_session_close(manager, dl_session_id(child_session));
