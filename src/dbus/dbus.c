@@ -421,6 +421,16 @@ static int authorize_session_async(sd_bus_message *m, struct dbus_context *ctx,
     return 1;
 }
 
+static int method_power_capability(sd_bus_message *m, void *userdata,
+                                       sd_bus_error *error)
+{
+    /* No host power backend is configured yet. "na" is the login1
+     * capability value for an operation unavailable on this manager. */
+    (void)userdata;
+    (void)error;
+    return sd_bus_reply_method_return(m, "s", "na");
+}
+
 static int method_set_user_linger(sd_bus_message *m, void *userdata,
                                     sd_bus_error *error)
 {
@@ -1430,6 +1440,12 @@ static const sd_bus_vtable manager_vtable[] = {
     SD_BUS_METHOD("ListSessions", "", "a(susso)", method_list_sessions, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("ListUsers", "", "a(uso)", method_list_users, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("ListSeats", "", "a(so)", method_list_seats, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("CanPowerOff", "", "s", method_power_capability, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("CanReboot", "", "s", method_power_capability, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("CanSuspend", "", "s", method_power_capability, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("CanHibernate", "", "s", method_power_capability, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("CanHybridSleep", "", "s", method_power_capability, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("CanSuspendThenHibernate", "", "s", method_power_capability, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("SetUserLinger", "ubb", "", method_set_user_linger, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_SIGNAL("SessionNew", "so", 0),
     SD_BUS_SIGNAL("SessionRemoved", "so", 0),
