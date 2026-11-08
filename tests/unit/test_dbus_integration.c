@@ -476,7 +476,6 @@ int main(void)
         if (r < 0 || !reply ||
             sd_bus_message_enter_container(reply, 'a', "(ssssuu)") <= 0 ||
             sd_bus_message_enter_container(reply, 'r', "ssssuu") != 0 ||
-            sd_bus_message_exit_container(reply) < 0 ||
             sd_bus_message_exit_container(reply) < 0 || inhibitor_count != 1) {
             stage = 1220;
             goto stop_server;
