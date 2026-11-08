@@ -523,6 +523,18 @@ int main(void)
         sd_bus_error_free(&error);
         sd_bus_message_unref(reply);
         reply = NULL;
+
+        /* Root linger is deliberately rejected before contacting Polkit. */
+        r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
+            "SetUserLinger", &error, &reply, "ubb", 0u, 1, 0);
+        if (r >= 0 || !sd_bus_error_has_name(&error,
+                "org.freedesktop.DBus.Error.InvalidArgs")) {
+            stage = 1225;
+            goto stop_server;
+        }
+        sd_bus_error_free(&error);
+        sd_bus_message_unref(reply);
+        reply = NULL;
     }
 
     stage = 13;
