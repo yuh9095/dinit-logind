@@ -1257,23 +1257,29 @@ static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
     }
     ctx->bus = dbus->bus;
     if (mkdir(DL_TERMINATION_STATE_PARENT, 0700) != 0 && errno != EEXIST) {
-        r = -errno;
-        goto fail_bus_setup;
-    }
-    {
+        fprintf(stderr,
+            "dinit-logind: durable termination journal unavailable (%s); Terminate disabled\n",
+            strerror(errno));
+    } else {
         struct stat state_parent;
         if (lstat(DL_TERMINATION_STATE_PARENT, &state_parent) != 0 ||
             !S_ISDIR(state_parent.st_mode) || state_parent.st_uid != 0 ||
             (state_parent.st_mode & 0077) != 0) {
-            r = errno ? -errno : -EPERM;
-            goto fail_bus_setup;
+            fprintf(stderr,
+                "dinit-logind: unsafe termination state directory; Terminate disabled\n");
+        } else {
+            r = dl_termination_store_open(&ctx->termination_store,
+                                          DL_TERMINATION_STATE_PATH, 1);
+            if (r < 0) {
+                fprintf(stderr,
+                    "dinit-logind: cannot open termination journal (%d); Terminate disabled\n",
+                    r);
+            } else {
+                ctx->termination_store_open = true;
+                (void)termination_recover_all(ctx);
+            }
         }
     }
-    r = dl_termination_store_open(&ctx->termination_store,
-                                  DL_TERMINATION_STATE_PATH, 1);
-    if (r < 0) goto fail_bus_setup;
-    ctx->termination_store_open = true;
-    (void)termination_recover_all(ctx);
     r = sd_bus_request_name(dbus->bus, DL_LOGIN1_NAME, 0);
     if (r < 0) {
         sd_bus_slot_unref(dbus->seat_slot);
@@ -1288,17 +1294,6 @@ static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
         return r;
     }
     return 0;
-fail_bus_setup:
-    sd_bus_slot_unref(dbus->seat_slot);
-    sd_bus_slot_unref(dbus->user_slot);
-    sd_bus_slot_unref(dbus->session_slot);
-    sd_bus_slot_unref(dbus->manager_slot);
-    sd_bus_unref(dbus->bus);
-    dbus->bus = NULL;
-    if (ctx->termination_store_open)
-        dl_termination_store_close(&ctx->termination_store);
-    free(ctx);
-    return r;
 }
 
 
