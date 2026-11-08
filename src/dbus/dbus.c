@@ -22,6 +22,7 @@
 #define DL_LOGIN1_NAME "org.freedesktop.login1"
 #define DL_LOGIN1_PATH "/org/freedesktop/login1"
 #define DL_LOGIN1_IFACE "org.freedesktop.login1.Manager"
+#define DL_INHIBITORS_MAX 4096u
 
 #ifndef DL_POLKIT_AUTH_TIMEOUT_USEC
 #define DL_POLKIT_AUTH_TIMEOUT_USEC (30ULL * 1000ULL * 1000ULL)
@@ -496,6 +497,8 @@ static int method_inhibit(sd_bus_message *m, void *userdata,
     const char *what, *who, *why, *mode;
     uid_t uid;
     pid_t pid;
+    struct inhibitor_record *existing;
+    size_t inhibitor_count = 0;
     int fds[2] = {-1, -1};
     int r;
 
@@ -522,6 +525,13 @@ static int method_inhibit(sd_bus_message *m, void *userdata,
         return sd_bus_error_set_const(error,
             "org.freedesktop.DBus.Error.AccessDenied",
             "Unable to determine inhibitor owner credentials");
+
+    for (existing = ctx->inhibitors; existing; existing = existing->next)
+        ++inhibitor_count;
+    if (inhibitor_count >= DL_INHIBITORS_MAX)
+        return sd_bus_error_set_const(error,
+            "org.freedesktop.DBus.Error.LimitsExceeded",
+            "The inhibitor limit has been reached");
 
     record = calloc(1, sizeof(*record));
     if (!record)
@@ -1259,7 +1269,10 @@ static int manager_property(sd_bus *bus, const char *path,
             if (len == 0) { p = end ? end + 1 : NULL; continue; }
             duplicate = inhibitor_value_has_token(value, p, len);
             if (!duplicate) {
-                if (used && used + 1 < sizeof(value)) value[used++] = ':';
+                if (used) {
+                    if (used + 1 >= sizeof(value)) return -ENOBUFS;
+                    value[used++] = ':';
+                }
                 if (len >= sizeof(value) - used) return -ENOBUFS;
                 memcpy(value + used, p, len);
                 used += len;
