@@ -558,6 +558,9 @@ static int method_inhibit(sd_bus_message *m, void *userdata,
     (void)snprintf(record->mode, sizeof(record->mode), "%s", mode);
 
     r = sd_bus_reply_method_return(m, "h", fds[0]);
+    /* sd-bus may retain the descriptor number until queued output is flushed.
+     * Keep the read end open until the SCM_RIGHTS transfer is complete. */
+    if (r >= 0) r = sd_bus_flush(ctx->bus);
     close(fds[0]);
     if (r < 0) {
         close(record->write_fd);
