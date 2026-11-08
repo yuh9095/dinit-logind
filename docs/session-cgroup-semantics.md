@@ -54,3 +54,6 @@ best-effort migration semantics above.
 The daemon checks that `cgroup.kill` is available before sending the initial signal. If the required primitive is unavailable, `Terminate()` fails closed. Pending terminations are also forced through `cgroup.kill` during daemon shutdown. Failed final kills are reported to stderr and retried while the event loop remains active.
 
 If the initial pidfd-based SIGTERM pass fails after it may have made partial progress, the D-Bus method reports the failure but the daemon retains the cgroup handle and still performs the scheduled final `cgroup.kill`. This prevents a partial best-effort signal pass from silently abandoning the rest of the session.
+
+
+The grace period defaults to 90 seconds and can be configured through the root-owned daemon configuration key `session_terminate_timeout_sec` (1–86400 seconds). This models systemd's configurable stop timeout rather than hard-coding a logind-specific interval. If `CLOCK_MONOTONIC` temporarily fails while processing pending work, the daemon postpones SIGKILL and retries on the next event-loop iteration; it never interprets a clock failure as an expired deadline.
