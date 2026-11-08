@@ -111,7 +111,7 @@ daemon_exe = executable(
   'src/daemon/runtime_socket.c',
   include_directories: include_directories('src/core', 'src/platform/linux', 'src/daemon', 'src/dbus'),
   dependencies: libsystemd_dep,
-  link_with: [core_lib, dbus_lib, linux_identity_lib, linux_peer_credentials_lib, linux_pam_session_lib, linux_pam_ingress_lib, daemon_config_lib, termination_lib, termination_store_lib],
+  link_with: [core_lib, dbus_lib, runtime_lib, linux_identity_lib, linux_peer_credentials_lib, linux_pam_session_lib, linux_pam_ingress_lib, daemon_config_lib, termination_lib, termination_store_lib],
   install: true,
   install_dir: get_option('sbindir'),
 )
@@ -126,6 +126,10 @@ if pam_dep.found()
     install: false,
   )
 endif
+
+install_data('data/org.freedesktop.login1.policy',
+  install_dir: get_option('datadir') / 'polkit-1/actions',
+)
 
 subdir('tests/unit')
 

@@ -12,6 +12,7 @@ jobs:
   glibc:
     name: Ubuntu (glibc) build and tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Install build tools and development headers
@@ -29,26 +30,143 @@ jobs:
           builddir/dinit-logind --version
           builddir/dinit-logind --help
 
-  musl:
-    name: Alpine Linux (musl) build and tests
+  alpine-musl:
+    name: Alpine musl (${{ matrix.arch }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            platform: linux/amd64
+          - arch: aarch64
+            platform: linux/arm64
+          - arch: x86
+            platform: linux/386
+          - arch: armv7
+            platform: linux/arm/v7
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm,arm64,386
       - name: Build and test inside Alpine musl
         run: |
-          docker run --rm \
+          docker run --rm --platform "${{ matrix.platform }}" \
             -v "$PWD:/src" \
             -w /src \
             alpine:3.23 \
             sh -euxc '
               apk add --no-cache build-base meson ninja pkgconf linux-pam-dev elogind-dev dbus
+              echo "Architecture:"
+              uname -m
               echo "C library:"
               ldd --version 2>&1 | head -n 1
               echo "sd-bus compatibility provider:"
               pkg-config --modversion libsystemd
-              meson setup builddir-musl
-              meson compile -C builddir-musl
-              meson test -C builddir-musl --print-errorlogs
-              builddir-musl/dinit-logind --version
-              builddir-musl/dinit-logind --help
+              meson setup builddir-${{ matrix.arch }}
+              meson compile -C builddir-${{ matrix.arch }}
+              meson test -C builddir-${{ matrix.arch }} --print-errorlogs
+              builddir-${{ matrix.arch }}/dinit-logind --version
+              builddir-${{ matrix.arch }}/dinit-logind --help
             '
+
+  archlinux:
+    name: Arch Linux (glibc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test inside Arch Linux
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src archlinux:latest \
+            bash -euxc '
+              pacman -Syu --noconfirm
+              pacman -S --noconfirm --needed base-devel meson ninja pkgconf pam systemd dbus
+              pkg-config --modversion libsystemd
+              meson setup builddir-arch
+              meson compile -C builddir-arch
+              meson test -C builddir-arch --print-errorlogs
+              builddir-arch/dinit-logind --version
+              builddir-arch/dinit-logind --help
+            '
+
+  chimera:
+    name: Chimera Linux (musl + dinit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test inside Chimera Linux
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src chimeralinux/chimera:latest \
+            sh -euxc '
+              apk update
+              apk add base-devel gmake meson ninja pkgconf clang lld linux-pam-devel elogind-devel dbus
+              command -v gmake
+              gmake --version
+              pkg-config --modversion libsystemd
+              CC=clang meson setup builddir-chimera
+              meson compile -C builddir-chimera
+              meson test -C builddir-chimera --print-errorlogs
+              builddir-chimera/dinit-logind --version
+              builddir-chimera/dinit-logind --help
+            '
+
+  asan-ubsan:
+    name: AddressSanitizer + UndefinedBehaviorSanitizer
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools and development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang meson ninja-build pkg-config libpam0g-dev libsystemd-dev dbus
+      - name: Configure sanitized build
+        env:
+          CC: clang
+        run: meson setup builddir-asan -Db_sanitize=address,undefined
+      - name: Compile
+        run: meson compile -C builddir-asan
+      - name: Run tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:abort_on_error=1:print_stacktrace=1
+        run: meson test -C builddir-asan --print-errorlogs
+
+  valgrind:
+    name: Valgrind memory and descriptor checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools and Valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind meson ninja-build pkg-config libpam0g-dev libsystemd-dev dbus
+      - name: Configure and compile
+        run: |
+          meson setup builddir-valgrind
+          meson compile -C builddir-valgrind
+      - name: Run unit tests under Valgrind
+        run: |
+          set -eux
+          for test in \
+            test-core \
+            test-process-identity \
+            test-peer-credentials \
+            test-pam-session \
+            test-pam-ingress \
+            test-daemon-config \
+            test-termination \
+            test-termination-store \
+            test-termination-cgroup \
+            test-runtime \
+            test-cgroup-v2
+          do
+            valgrind --error-exitcode=99 --leak-check=full \
+              --show-leak-kinds=definite,indirect \
+              "builddir-valgrind/tests/unit/$test"
+          done

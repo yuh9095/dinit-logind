@@ -7,9 +7,11 @@
 #include "../platform/linux/cgroup_v2.h"
 #include "../session/termination.h"
 #include "../session/termination_store.h"
+#include "../runtime/runtime.h"
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <signal.h>
+#include <poll.h>
 #include <errno.h>
 #include <pwd.h>
 #include <stdio.h>
@@ -21,6 +23,7 @@
 #define DL_LOGIN1_NAME "org.freedesktop.login1"
 #define DL_LOGIN1_PATH "/org/freedesktop/login1"
 #define DL_LOGIN1_IFACE "org.freedesktop.login1.Manager"
+#define DL_INHIBITORS_MAX 4096u
 
 #ifndef DL_POLKIT_AUTH_TIMEOUT_USEC
 #define DL_POLKIT_AUTH_TIMEOUT_USEC (30ULL * 1000ULL * 1000ULL)
@@ -32,7 +35,8 @@ enum session_operation {
     SESSION_OP_KILL_LEADER,
     SESSION_OP_KILL_ALL,
     SESSION_OP_LOCK,
-    SESSION_OP_UNLOCK
+    SESSION_OP_UNLOCK,
+    SESSION_OP_SET_USER_LINGER
 };
 
 struct pending_authorization {
@@ -42,7 +46,21 @@ struct pending_authorization {
     char session_id[DL_SESSION_ID_MAX];
     enum session_operation operation;
     int32_t signal_number;
+    uint32_t user_uid;
+    bool user_linger_enabled;
+    uint32_t polkit_flags;
     struct pending_authorization *next;
+};
+
+struct inhibitor_record {
+    int write_fd;
+    uint32_t uid;
+    uint32_t pid;
+    char what[DL_METADATA_MAX];
+    char who[DL_METADATA_MAX];
+    char why[DL_METADATA_MAX];
+    char mode[16];
+    struct inhibitor_record *next;
 };
 
 struct dbus_context {
@@ -53,10 +71,13 @@ struct dbus_context {
     uint32_t terminate_timeout_sec;
     dl_termination_store termination_store;
     bool termination_store_open;
+    dl_runtime_paths runtime_paths;
+    struct inhibitor_record *inhibitors;
 };
 
 static int session_from_message(sd_bus_message *m, struct dbus_context *ctx,
                                 dl_session **ret_session);
+static int path_for_user(uint32_t uid, char *path, size_t size);
 
 struct termination_payload {
     dl_linux_cgroup_v2_session cgroup;
@@ -108,6 +129,43 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
                                challenge ? "Polkit authorization requires interaction" :
                                            "Polkit authorization was denied or unavailable");
         (void)sd_bus_reply_method_error(pending->request, &error);
+        sd_bus_error_free(&error);
+        pending_authorization_free(pending);
+        return 1;
+    }
+
+    if (pending->operation == SESSION_OP_SET_USER_LINGER) {
+        struct passwd pwd, *result = NULL;
+        char scratch[16384];
+        int lookup = getpwuid_r((uid_t)pending->user_uid, &pwd, scratch,
+                                sizeof(scratch), &result);
+        if (lookup != 0 || !result) {
+            sd_bus_error_set_const(&error, "org.freedesktop.login1.NoSuchUser",
+                                   "The requested UID has no passwd entry");
+            (void)sd_bus_reply_method_error(pending->request, &error);
+        } else {
+            dl_result runtime_result = dl_runtime_set_linger(
+                &ctx->runtime_paths, pending->user_uid,
+                pending->user_linger_enabled);
+            if (runtime_result != DL_OK) {
+                sd_bus_error_set_const(&error,
+                    runtime_result == DL_ERR_NOT_FOUND ?
+                    "org.freedesktop.DBus.Error.NotSupported" :
+                    "org.freedesktop.login1.OperationFailed",
+                    "Persistent linger storage is unavailable or unsafe");
+                (void)sd_bus_reply_method_error(pending->request, &error);
+            } else if (dl_user_set_linger(ctx->manager, pending->user_uid,
+                                          pending->user_linger_enabled) != DL_OK) {
+                /* The persistent marker remains authoritative; retrying the
+                 * request will reconcile the in-memory state. */
+                sd_bus_error_set_const(&error,
+                    "org.freedesktop.login1.OperationFailed",
+                    "Unable to update the user state");
+                (void)sd_bus_reply_method_error(pending->request, &error);
+            } else {
+                (void)sd_bus_reply_method_return(pending->request, "");
+            }
+        }
         sd_bus_error_free(&error);
         pending_authorization_free(pending);
         return 1;
@@ -284,6 +342,9 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
         r = sd_bus_emit_signal(ctx->bus, sd_bus_message_get_path(pending->request),
                                "org.freedesktop.login1.Session", member, "");
         break;
+    case SESSION_OP_SET_USER_LINGER:
+        r = -EINVAL; /* Handled before resolving a session object. */
+        break;
     }
 
     if (r < 0) {
@@ -347,7 +408,83 @@ static int authorize_session_async(sd_bus_message *m, struct dbus_context *ctx,
     if (r >= 0) r = sd_bus_message_append(call, "s", action);
     if (r >= 0) r = sd_bus_message_open_container(call, 'a', "{ss}");
     if (r >= 0) r = sd_bus_message_close_container(call);
-    if (r >= 0) r = sd_bus_message_append(call, "us", 1u, "");
+    if (r >= 0) r = sd_bus_message_append(call, "us", pending->polkit_flags, "");
+    if (r >= 0) r = sd_bus_call_async(ctx->bus, &pending->slot, call,
+                                      session_authorization_reply, pending,
+                                      DL_POLKIT_AUTH_TIMEOUT_USEC);
+    sd_bus_message_unref(call);
+    if (r < 0) {
+        pending_authorization_free(pending);
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.AccessDenied",
+                                      "Unable to contact Polkit authority");
+    }
+    return 1;
+}
+
+static int method_power_capability(sd_bus_message *m, void *userdata,
+                                       sd_bus_error *error)
+{
+    /* No host power backend is configured yet. "na" is the login1
+     * capability value for an operation unavailable on this manager. */
+    (void)userdata;
+    (void)error;
+    return sd_bus_reply_method_return(m, "s", "na");
+}
+
+static int method_set_user_linger(sd_bus_message *m, void *userdata,
+                                    sd_bus_error *error)
+{
+    struct dbus_context *ctx = userdata;
+    struct pending_authorization *pending = NULL;
+    sd_bus_message *call = NULL;
+    const char *sender;
+    uint32_t uid;
+    int enable, interactive, r;
+
+    r = sd_bus_message_read(m, "ubb", &uid, &enable, &interactive);
+    if (r < 0) return r;
+    if (enable != 0 && enable != 1)
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.InvalidArgs",
+                                      "Invalid linger enable flag");
+    if (interactive != 0 && interactive != 1)
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.InvalidArgs",
+                                      "Invalid interactive flag");
+    if (uid == 0)
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.InvalidArgs",
+                                      "Linger for the root user is not supported");
+    sender = sd_bus_message_get_sender(m);
+    if (!sender || sender[0] != ':')
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.AccessDenied",
+                                      "A unique D-Bus sender is required for authorization");
+
+    pending = calloc(1, sizeof(*pending));
+    if (!pending)
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.NoMemory",
+                                      "Unable to allocate authorization request");
+    pending->ctx = ctx;
+    pending->operation = SESSION_OP_SET_USER_LINGER;
+    pending->user_uid = uid;
+    pending->user_linger_enabled = enable != 0;
+    pending->polkit_flags = interactive ? 1u : 0u;
+    pending->request = sd_bus_message_ref(m);
+    pending->next = ctx->pending;
+    ctx->pending = pending;
+
+    r = sd_bus_message_new_method_call(ctx->bus, &call,
+        "org.freedesktop.PolicyKit1", "/org/freedesktop/PolicyKit1/Authority",
+        "org.freedesktop.PolicyKit1.Authority", "CheckAuthorization");
+    if (r >= 0) r = sd_bus_message_open_container(call, 'r', "sa{sv}");
+    if (r >= 0) r = sd_bus_message_append(call, "s", "system-bus-name");
+    if (r >= 0) r = sd_bus_message_open_container(call, 'a', "{sv}");
+    if (r >= 0) r = sd_bus_message_append(call, "{sv}", "name", "s",
+                                           sender);
+    if (r >= 0) r = sd_bus_message_close_container(call);
+    if (r >= 0) r = sd_bus_message_close_container(call);
+    if (r >= 0) r = sd_bus_message_append(call, "s",
+                                           "org.freedesktop.login1.set-user-linger");
+    if (r >= 0) r = sd_bus_message_open_container(call, 'a', "{ss}");
+    if (r >= 0) r = sd_bus_message_close_container(call);
+    if (r >= 0) r = sd_bus_message_append(call, "us", pending->polkit_flags, "");
     if (r >= 0) r = sd_bus_call_async(ctx->bus, &pending->slot, call,
                                       session_authorization_reply, pending,
                                       DL_POLKIT_AUTH_TIMEOUT_USEC);
@@ -434,6 +571,157 @@ static int uid_to_name(uint32_t uid, char *name, size_t size)
 }
 
 static int path_for_user(uint32_t uid, char *path, size_t size);
+
+static void inhibitor_remove(struct dbus_context *ctx,
+                             struct inhibitor_record **link)
+{
+    struct inhibitor_record *record;
+    if (!ctx || !link || !*link) return;
+    record = *link;
+    *link = record->next;
+    if (record->write_fd >= 0) close(record->write_fd);
+    free(record);
+}
+
+/* The client owns the read end of a pipe; the daemon retains the write end.
+ * POLLERR on the write end means every client copy of the inhibitor FD closed. */
+static void inhibitors_emit_changed(struct dbus_context *ctx)
+{
+    if (!ctx || !ctx->bus) return;
+    (void)sd_bus_emit_properties_changed(ctx->bus, DL_LOGIN1_PATH,
+        DL_LOGIN1_IFACE, "NCurrentInhibitors", "BlockInhibited",
+        "DelayInhibited", NULL);
+}
+
+static void inhibitors_reap(struct dbus_context *ctx)
+{
+    struct inhibitor_record **link;
+    bool changed = false;
+    if (!ctx) return;
+    for (link = &ctx->inhibitors; *link;) {
+        struct pollfd pfd = { .fd = (*link)->write_fd, .events = POLLERR | POLLHUP };
+        int r = poll(&pfd, 1, 0);
+        if (r > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+            inhibitor_remove(ctx, link);
+            changed = true;
+        }
+        else
+            link = &(*link)->next;
+    }
+    if (changed) inhibitors_emit_changed(ctx);
+}
+
+static int method_inhibit(sd_bus_message *m, void *userdata,
+                          sd_bus_error *error)
+{
+    struct dbus_context *ctx = userdata;
+    struct inhibitor_record *record = NULL;
+    sd_bus_creds *creds = NULL;
+    const char *what, *who, *why, *mode;
+    uid_t uid;
+    pid_t pid;
+    struct inhibitor_record *existing;
+    size_t inhibitor_count = 0;
+    int fds[2] = {-1, -1};
+    int r;
+
+    r = sd_bus_message_read(m, "ssss", &what, &who, &why, &mode);
+    if (r < 0) return r;
+    if (!what || !what[0] || !who || !who[0] || !why || !mode ||
+        (strcmp(mode, "block") != 0 && strcmp(mode, "delay") != 0) ||
+        strnlen(what, DL_METADATA_MAX) >= DL_METADATA_MAX ||
+        strnlen(who, DL_METADATA_MAX) >= DL_METADATA_MAX ||
+        strnlen(why, DL_METADATA_MAX) >= DL_METADATA_MAX)
+        return sd_bus_error_set_const(error,
+            "org.freedesktop.DBus.Error.InvalidArgs",
+            "Inhibit requires bounded what/who/why strings and block or delay mode");
+
+    if (strcmp(mode, "delay") == 0)
+        return sd_bus_error_set_const(error,
+            "org.freedesktop.DBus.Error.NotSupported",
+            "Delay inhibitors are unavailable until power-transition coordination is enabled");
+
+    r = sd_bus_query_sender_creds(m, SD_BUS_CREDS_EUID | SD_BUS_CREDS_PID, &creds);
+    if (r < 0)
+        return sd_bus_error_set_const(error,
+            "org.freedesktop.DBus.Error.AccessDenied",
+            "Unable to determine inhibitor owner credentials");
+    r = sd_bus_creds_get_euid(creds, &uid);
+    if (r >= 0) r = sd_bus_creds_get_pid(creds, &pid);
+    sd_bus_creds_unref(creds);
+    if (r < 0)
+        return sd_bus_error_set_const(error,
+            "org.freedesktop.DBus.Error.AccessDenied",
+            "Unable to determine inhibitor owner credentials");
+
+    for (existing = ctx->inhibitors; existing; existing = existing->next)
+        ++inhibitor_count;
+    if (inhibitor_count >= DL_INHIBITORS_MAX)
+        return sd_bus_error_set_const(error,
+            "org.freedesktop.DBus.Error.LimitsExceeded",
+            "The inhibitor limit has been reached");
+
+    record = calloc(1, sizeof(*record));
+    if (!record)
+        return sd_bus_error_set_const(error,
+            "org.freedesktop.DBus.Error.NoMemory",
+            "Unable to allocate inhibitor record");
+    if (pipe2(fds, O_CLOEXEC | O_NONBLOCK) != 0) {
+        free(record);
+        return sd_bus_error_setf(error,
+            "org.freedesktop.login1.OperationFailed",
+            "Unable to create inhibitor descriptor: %s", strerror(errno));
+    }
+    record->write_fd = fds[1];
+    record->uid = (uint32_t)uid;
+    record->pid = (uint32_t)pid;
+    (void)snprintf(record->what, sizeof(record->what), "%s", what);
+    (void)snprintf(record->who, sizeof(record->who), "%s", who);
+    (void)snprintf(record->why, sizeof(record->why), "%s", why);
+    (void)snprintf(record->mode, sizeof(record->mode), "%s", mode);
+
+    r = sd_bus_reply_method_return(m, "h", fds[0]);
+    /* sd-bus may retain the descriptor number until queued output is flushed.
+     * Keep the read end open until the SCM_RIGHTS transfer is complete. */
+    if (r >= 0) r = sd_bus_flush(ctx->bus);
+    close(fds[0]);
+    if (r < 0) {
+        close(record->write_fd);
+        free(record);
+        return r;
+    }
+    record->next = ctx->inhibitors;
+    ctx->inhibitors = record;
+    inhibitors_emit_changed(ctx);
+    return r;
+}
+
+static int method_list_inhibitors(sd_bus_message *m, void *userdata,
+                                  sd_bus_error *error)
+{
+    struct dbus_context *ctx = userdata;
+    struct inhibitor_record *record;
+    sd_bus_message *reply = NULL;
+    int r;
+    (void)error;
+    inhibitors_reap(ctx);
+    r = sd_bus_message_new_method_return(m, &reply);
+    if (r < 0) return r;
+    r = sd_bus_message_open_container(reply, 'a', "(ssssuu)");
+    for (record = ctx->inhibitors; r >= 0 && record; record = record->next)
+        r = sd_bus_message_append(reply, "(ssssuu)", record->what, record->who,
+                                  record->why, record->mode, record->uid, record->pid);
+    if (r >= 0) r = sd_bus_message_close_container(reply);
+    if (r >= 0) r = sd_bus_send(sd_bus_message_get_bus(m), reply, NULL);
+    sd_bus_message_unref(reply);
+    return r;
+}
+
+static void inhibitors_finish(struct dbus_context *ctx)
+{
+    while (ctx && ctx->inhibitors)
+        inhibitor_remove(ctx, &ctx->inhibitors);
+}
 
 static int method_get_session(sd_bus_message *m, void *userdata,
                               sd_bus_error *ret_error)
@@ -777,6 +1065,7 @@ static int user_property(sd_bus *bus, const char *path, const char *interface,
     const dl_user *user;
     struct passwd pwd, *result = NULL;
     char scratch[16384];
+    bool linger_enabled;
     size_t i;
     int r;
     (void)bus; (void)interface;
@@ -793,6 +1082,13 @@ static int user_property(sd_bus *bus, const char *path, const char *interface,
     user = dl_user_find(ctx->manager, (uint32_t)parsed);
     if (!user) return sd_bus_error_set_const(error, "org.freedesktop.login1.NoSuchUser",
                                               "User no longer exists");
+    linger_enabled = dl_user_linger_enabled(user);
+    {
+        bool persisted = false;
+        if (dl_runtime_get_linger(&ctx->runtime_paths, (uint32_t)parsed,
+                                  &persisted) == DL_OK)
+            linger_enabled = persisted;
+    }
     if (strcmp(property, "UID") == 0)
         return sd_bus_message_append(reply, "u", (uint32_t)parsed);
     if (strcmp(property, "GID") == 0) {
@@ -815,13 +1111,13 @@ static int user_property(sd_bus *bus, const char *path, const char *interface,
     if (strcmp(property, "State") == 0) {
         const char *state = dl_user_active_session_count(user) ? "active" :
             dl_user_session_count(user) ? "online" :
-            dl_user_linger_enabled(user) ? "lingering" : "offline";
+            linger_enabled ? "lingering" : "offline";
         return sd_bus_message_append(reply, "s", state);
     }
     if (strcmp(property, "Display") == 0)
         return sd_bus_message_append(reply, "(so)", "", "/");
     if (strcmp(property, "Linger") == 0)
-        return sd_bus_message_append(reply, "b", dl_user_linger_enabled(user));
+        return sd_bus_message_append(reply, "b", linger_enabled);
     if (strcmp(property, "IdleHint") == 0)
         return sd_bus_message_append(reply, "b", 0);
     if (strcmp(property, "Sessions") == 0) {
@@ -1059,16 +1355,98 @@ static int fallback_object_find(sd_bus *bus, const char *path,
     return r < 0 ? r : 0;
 }
 
+static bool inhibitor_value_has_token(const char *value, const char *token,
+                                      size_t token_len)
+{
+    const char *p = value;
+    while (p && *p) {
+        const char *end = strchr(p, ':');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len == token_len && memcmp(p, token, len) == 0) return true;
+        if (!end) break;
+        p = end + 1;
+    }
+    return false;
+}
+
+static int manager_property(sd_bus *bus, const char *path,
+                            const char *interface, const char *property,
+                            sd_bus_message *reply, void *userdata,
+                            sd_bus_error *error)
+{
+    struct dbus_context *ctx = userdata;
+    struct inhibitor_record *record;
+    char value[4096];
+    size_t used = 0;
+    uint64_t count = 0;
+    bool delay;
+    (void)bus;
+    (void)interface;
+
+    if (!path || strcmp(path, DL_LOGIN1_PATH) != 0)
+        return property_unknown(error, property);
+    inhibitors_reap(ctx);
+    if (strcmp(property, "NCurrentInhibitors") == 0) {
+        for (record = ctx->inhibitors; record; record = record->next) ++count;
+        return sd_bus_message_append(reply, "t", count);
+    }
+    if (strcmp(property, "InhibitDelayMaxUSec") == 0)
+        return sd_bus_message_append(reply, "t", (uint64_t)0);
+    if (strcmp(property, "BlockInhibited") != 0 &&
+        strcmp(property, "DelayInhibited") != 0)
+        return property_unknown(error, property);
+
+    delay = strcmp(property, "DelayInhibited") == 0;
+    value[0] = '\0';
+    for (record = ctx->inhibitors; record; record = record->next) {
+        const char *p = record->what;
+        if ((strcmp(record->mode, "delay") == 0) != delay) continue;
+        while (p && *p) {
+            const char *end = strchr(p, ':');
+            size_t len = end ? (size_t)(end - p) : strlen(p);
+            bool duplicate;
+            if (len == 0) { p = end ? end + 1 : NULL; continue; }
+            duplicate = inhibitor_value_has_token(value, p, len);
+            if (!duplicate) {
+                if (used) {
+                    if (used + 1 >= sizeof(value)) return -ENOBUFS;
+                    value[used++] = ':';
+                }
+                if (len >= sizeof(value) - used) return -ENOBUFS;
+                memcpy(value + used, p, len);
+                used += len;
+                value[used] = '\0';
+            }
+            if (!end) break;
+            p = end + 1;
+        }
+    }
+    return sd_bus_message_append(reply, "s", value);
+}
+
 static const sd_bus_vtable manager_vtable[] = {
     SD_BUS_VTABLE_START(0),
+    SD_BUS_PROPERTY("BlockInhibited", "s", manager_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("DelayInhibited", "s", manager_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("NCurrentInhibitors", "t", manager_property, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+    SD_BUS_PROPERTY("InhibitDelayMaxUSec", "t", manager_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
     SD_BUS_METHOD("GetSession", "s", "o", method_get_session, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("GetSessionByPID", "u", "o", method_get_session_by_pid, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("GetUser", "u", "o", method_get_user, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("GetUserByPID", "u", "o", method_get_user_by_pid, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("GetSeat", "s", "o", method_get_seat, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("Inhibit", "ssss", "h", method_inhibit, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("ListInhibitors", "", "a(ssssuu)", method_list_inhibitors, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("ListSessions", "", "a(susso)", method_list_sessions, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("ListUsers", "", "a(uso)", method_list_users, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("ListSeats", "", "a(so)", method_list_seats, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("CanPowerOff", "", "s", method_power_capability, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("CanReboot", "", "s", method_power_capability, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("CanSuspend", "", "s", method_power_capability, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("CanHibernate", "", "s", method_power_capability, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("CanHybridSleep", "", "s", method_power_capability, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("CanSuspendThenHibernate", "", "s", method_power_capability, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("SetUserLinger", "ubb", "", method_set_user_linger, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_SIGNAL("SessionNew", "so", 0),
     SD_BUS_SIGNAL("SessionRemoved", "so", 0),
     SD_BUS_SIGNAL("UserNew", "uo", 0),
@@ -1160,6 +1538,39 @@ static int termination_recover_record(const dl_termination_record *record,
     return 0;
 }
 
+static int ensure_linger_directory(void)
+{
+    int parent = -1, child = -1, r = 0;
+    struct stat st;
+
+    parent = open(DL_TERMINATION_STATE_PARENT,
+                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (parent < 0) return -errno;
+    if (fstat(parent, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        st.st_uid != 0 || (st.st_mode & 0022) != 0) {
+        close(parent);
+        return -EPERM;
+    }
+    if (mkdirat(parent, "linger", 0755) != 0 && errno != EEXIST) {
+        r = -errno;
+        close(parent);
+        return r;
+    }
+    child = openat(parent, "linger",
+                   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (child < 0) {
+        r = -errno;
+        close(parent);
+        return r;
+    }
+    if (fstat(child, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        st.st_uid != 0 || (st.st_mode & 0022) != 0)
+        r = -EPERM;
+    close(child);
+    close(parent);
+    return r;
+}
+
 static int termination_recover_all(struct dbus_context *ctx)
 {
     struct termination_recovery_context recovery;
@@ -1206,6 +1617,9 @@ static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
     ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return -ENOMEM;
     ctx->manager = manager;
+    ctx->runtime_paths.runtime_base = "/run/user";
+    ctx->runtime_paths.linger_directory = "/var/lib/dinit-logind/linger";
+    ctx->runtime_paths.trusted_owner = 0;
     ctx->terminate_timeout_sec = 90;
     dl_termination_queue_init(&ctx->terminations, 90);
     dbus->manager = manager;
@@ -1256,7 +1670,7 @@ static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
         sd_bus_unref(dbus->bus); dbus->bus = NULL; free(ctx); return r;
     }
     ctx->bus = dbus->bus;
-    if (mkdir(DL_TERMINATION_STATE_PARENT, 0700) != 0 && errno != EEXIST) {
+    if (mkdir(DL_TERMINATION_STATE_PARENT, 0755) != 0 && errno != EEXIST) {
         fprintf(stderr,
             "dinit-logind: durable termination journal unavailable (%s); Terminate disabled\n",
             strerror(errno));
@@ -1279,6 +1693,12 @@ static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
                 (void)termination_recover_all(ctx);
             }
         }
+    }
+    if (geteuid() == 0) {
+        r = ensure_linger_directory();
+        if (r < 0)
+            fprintf(stderr, "dinit-logind: persistent linger storage unavailable or unsafe (%s)\n",
+                    strerror(-r));
     }
     r = sd_bus_request_name(dbus->bus, DL_LOGIN1_NAME, 0);
     if (r < 0) {
@@ -1400,10 +1820,19 @@ static int process_core_events(dl_dbus *dbus)
         }
         if (result != DL_OK) return -EIO;
         switch (event.type) {
-        case DL_EVENT_USER_ADDED:
+        case DL_EVENT_USER_ADDED: {
+            bool linger = false;
+            /* Rehydrate the persistent policy when the user first appears
+             * after a daemon restart. Missing/unsafe storage is fail-closed. */
+            if (dl_runtime_get_linger(
+                    &(dl_runtime_paths){ .runtime_base = "/run/user",
+                        .linger_directory = "/var/lib/dinit-logind/linger",
+                        .trusted_owner = 0 }, event.uid, &linger) == DL_OK && linger)
+                (void)dl_user_set_linger(dbus->manager, event.uid, true);
             r = emit_manager_object_signal(dbus, "UserNew", "uo", NULL,
                                            event.uid, "user");
             break;
+        }
         case DL_EVENT_SEAT_ADDED:
             r = emit_manager_object_signal(dbus, "SeatNew", "so",
                                            event.seat_id, 0, "seat");
@@ -1485,10 +1914,11 @@ int dl_dbus_process(dl_dbus *dbus)
         r = sd_bus_process(dbus->bus, NULL);
     } while (r > 0);
     if (r < 0) return r;
-    r = process_core_events(dbus);
-    if (r < 0) return r;
     ctx = dbus->manager_slot ?
           sd_bus_slot_get_userdata(dbus->manager_slot) : NULL;
+    inhibitors_reap(ctx);
+    r = process_core_events(dbus);
+    if (r < 0) return r;
     return ctx ? dl_termination_queue_process(&ctx->terminations) : 0;
 }
 
@@ -1499,6 +1929,7 @@ void dl_dbus_close(dl_dbus *dbus)
     if (dbus->manager_slot) ctx = sd_bus_slot_get_userdata(dbus->manager_slot);
     if (ctx) dl_termination_queue_finish(&ctx->terminations);
     pending_authorizations_cancel(ctx);
+    inhibitors_finish(ctx);
     if (ctx && ctx->termination_store_open) {
         dl_termination_store_close(&ctx->termination_store);
         ctx->termination_store_open = false;
