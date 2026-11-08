@@ -50,7 +50,7 @@ dbus_lib = static_library(
   'src/dbus/dbus.c',
   include_directories: include_directories('src/core', 'src/dbus', 'src/platform/linux', 'src/session'),
   dependencies: libsystemd_dep,
-  link_with: [core_lib, linux_identity_lib, linux_cgroup_v2_lib, termination_lib],
+  link_with: [core_lib, linux_identity_lib, linux_cgroup_v2_lib, termination_lib, termination_store_lib],
   install: false,
 )
 
@@ -111,7 +111,7 @@ daemon_exe = executable(
   'src/daemon/runtime_socket.c',
   include_directories: include_directories('src/core', 'src/platform/linux', 'src/daemon', 'src/dbus'),
   dependencies: libsystemd_dep,
-  link_with: [core_lib, dbus_lib, linux_identity_lib, linux_peer_credentials_lib, linux_pam_session_lib, linux_pam_ingress_lib, daemon_config_lib, termination_lib],
+  link_with: [core_lib, dbus_lib, linux_identity_lib, linux_peer_credentials_lib, linux_pam_session_lib, linux_pam_ingress_lib, daemon_config_lib, termination_lib, termination_store_lib],
   install: true,
   install_dir: get_option('sbindir'),
 )
