@@ -193,6 +193,7 @@ int main(void)
     dl_session_spec child_spec;
     dl_session *child_session = NULL;
     char child_path[256];
+    char *session_state = NULL;
 
     if (!address) {
         fprintf(stderr, "DBUS_SESSION_BUS_ADDRESS is not set\n");
@@ -618,6 +619,16 @@ int main(void)
             if (r < 0) goto stop_server;
             sd_bus_message_unref(reply);
             reply = NULL;
+
+            /* The accepted stop transition is externally visible before
+             * PAM teardown removes the Session object. */
+            r = sd_bus_get_property_string(client, LOGIN1_NAME, child_path,
+                SESSION_IFACE, "State", &error, &session_state);
+            if (r < 0 || !session_state ||
+                strcmp(session_state, "closing") != 0)
+                goto stop_server;
+            free(session_state);
+            session_state = NULL;
 
             /* Repeating Terminate while the first grace-period operation is
              * pending is idempotent: it must not enqueue a second cgroup kill
