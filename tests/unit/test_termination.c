@@ -123,8 +123,34 @@ static void test_shutdown_finishes_all(void)
     assert(!dl_termination_queue_contains(&q, "b"));
 }
 
+static void test_schedule_at_restores_absolute_deadline(void)
+{
+    dl_termination_queue q;
+    struct fake_payload future = {0}, expired = {0};
+    struct timespec future_deadline = {510, 250};
+    struct timespec expired_deadline = {499, 999999999L};
+    dl_termination_queue_init(&q, 90);
+    dl_termination_queue_set_clock(&q, fake_clock);
+    fake_now.tv_sec = 500;
+    assert(dl_termination_queue_schedule_at(&q, "restored-future",
+        &future_deadline, &future, fake_kill, fake_release) == 0);
+    assert(dl_termination_queue_schedule_at(&q, "restored-expired",
+        &expired_deadline, &expired, fake_kill, fake_release) == 0);
+    assert(dl_termination_queue_process(&q) == 0);
+    assert(future.kills == 0 && future.releases == 0);
+    assert(expired.kills == 1 && expired.releases == 1);
+    fake_now.tv_sec = 510;
+    fake_now.tv_nsec = 249;
+    assert(dl_termination_queue_process(&q) == 0);
+    assert(future.kills == 0);
+    fake_now.tv_nsec = 250;
+    assert(dl_termination_queue_process(&q) == 0);
+    assert(future.kills == 1 && future.releases == 1);
+}
+
 int main(void)
 {
+    test_schedule_at_restores_absolute_deadline();
     test_deadline_and_expiry();
     test_schedule_clock_failure_keeps_ownership();
     test_clock_failure_postpones();

@@ -103,10 +103,27 @@ static void test_invalid_record_rejected(void)
     assert(rmdir(dir) == 0);
 }
 
+static void test_malformed_boot_id_rejected(void)
+{
+    char path[] = "/tmp/dl-term-bootid-XXXXXX";
+    char *dir = mkdtemp(path);
+    dl_termination_store store;
+    dl_termination_record record = sample();
+    assert(dir);
+    assert(chmod(dir, 0700) == 0);
+    if (geteuid() != 0) { rmdir(dir); return; }
+    assert(dl_termination_store_open(&store, dir, 0) == 0);
+    record.boot_id[8] = 'x';
+    assert(dl_termination_store_put(&store, &record) == -EINVAL);
+    dl_termination_store_close(&store);
+    assert(rmdir(dir) == 0);
+}
+
 int main(void)
 {
     test_roundtrip_and_remove();
     test_corruption_fails_closed();
     test_invalid_record_rejected();
+    test_malformed_boot_id_rejected();
     return 0;
 }
