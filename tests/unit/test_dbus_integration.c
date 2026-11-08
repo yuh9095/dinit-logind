@@ -5,6 +5,7 @@
 #include "../../src/platform/linux/cgroup_v2.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/wait.h>
@@ -393,6 +394,10 @@ int main(void)
         if (r < 0 || sd_bus_message_read(reply, "h", &inhibitor_fd) < 0 ||
             inhibitor_fd < 0)
             goto stop_server;
+        /* The descriptor read from an sd-bus message is borrowed from that
+         * message; keep our own copy after releasing the reply. */
+        inhibitor_fd = fcntl(inhibitor_fd, F_DUPFD_CLOEXEC, 3);
+        if (inhibitor_fd < 0) goto stop_server;
         sd_bus_message_unref(reply);
         reply = NULL;
 
