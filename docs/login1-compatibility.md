@@ -19,8 +19,9 @@ The current implementation provides:
 - `BlockInhibited`, `DelayInhibited`, `NCurrentInhibitors`, and `InhibitDelayMaxUSec`.
 - Property-change notifications when inhibitors are registered or reaped.
 - A bounded in-memory inhibitor table. Closing the final client copy releases the inhibitor.
+- Delay-mode requests are explicitly rejected with `NotSupported` until transition coordination exists; `InhibitDelayMaxUSec` is therefore zero.
 
-This is not yet full inhibitor orchestration. In particular, delay locks are reported but are not yet awaited by shutdown/sleep transitions, and power/sleep actions do not yet emit the prepare signals or consult the inhibitor table. Do not advertise these parts as complete until the orchestration and timeout behavior have tests.
+This is not yet full inhibitor orchestration. Power/sleep actions do not yet emit the prepare signals or consult the block-inhibitor table. Do not advertise these parts as complete until orchestration, delay deadlines, and timeout behavior have tests.
 
 ## Manager API inventory
 
