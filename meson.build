@@ -30,6 +30,13 @@ termination_lib = static_library(
   install: false,
 )
 
+termination_store_lib = static_library(
+  'dinit-logind-termination-store',
+  'src/session/termination_store.c',
+  include_directories: include_directories('src/session'),
+  install: false,
+)
+
 linux_cgroup_v2_lib = static_library(
   'dinit-logind-linux-cgroup-v2',
   'src/platform/linux/cgroup_v2.c',

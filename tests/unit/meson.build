@@ -61,6 +61,16 @@ termination_test = executable(
 )
 test('asynchronous session termination scheduler', termination_test)
 
+termination_store_test = executable(
+  'test-termination-store',
+  'test_termination_store.c',
+  include_directories: include_directories('../../src/session'),
+  link_with: termination_store_lib,
+  install: false,
+)
+test('durable termination intent store validation and recovery records',
+     termination_store_test)
+
 termination_cgroup_test = executable(
   'test-termination-cgroup',
   'test_termination_cgroup.c',
