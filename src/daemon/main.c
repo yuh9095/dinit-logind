@@ -237,6 +237,14 @@ int main(int argc, char **argv)
         dl_runtime_socket_close(&runtime);
         return 1;
     }
+    if (dl_dbus_set_terminate_timeout(
+            &dbus, config.session_terminate_timeout_sec) != 0) {
+        (void)fprintf(stderr, "dinit-logind: invalid session termination timeout\\n");
+        dl_dbus_close(&dbus);
+        dl_manager_destroy(manager);
+        dl_runtime_socket_close(&runtime);
+        return 1;
+    }
     if (install_signal_handlers() != 0) {
         (void)fprintf(stderr, "dinit-logind: cannot install signal handlers: %s\n",
                       strerror(errno));
