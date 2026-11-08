@@ -53,6 +53,9 @@ struct dbus_context {
 static int session_from_message(sd_bus_message *m, struct dbus_context *ctx,
                                 dl_session **ret_session);
 
+static int termination_cgroup_kill(void *payload);
+static void termination_cgroup_release(void *payload);
+
 static void pending_authorization_remove(struct pending_authorization *pending)
 {
     struct pending_authorization **link;
@@ -140,7 +143,7 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
                 *payload = cgroup_session;
                 cgroup_session.fd = -1;
                 cgroup_session.parent_fd = -1;
-                cgroup_session.name[0] = '\\0';
+                cgroup_session.name[0] = '\0';
             }
         }
         if (r == 0) {

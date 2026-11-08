@@ -100,7 +100,7 @@ int dl_termination_queue_process(dl_termination_queue *queue)
     if (!queue) return -EINVAL;
     if (!queue->head) return 0;
     if (!queue->clock_fn) queue->clock_fn = default_clock;
-    if (queue->clock_fn(CLOCK_MONOTONIC, &now) != 0) {
+    if (queue->clock_fn(&now) != 0) {
         int saved = errno ? errno : EIO;
         dl_termination_item *item;
         for (item = queue->head; item; item = item->next) {
