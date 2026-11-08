@@ -1522,6 +1522,39 @@ static int termination_recover_record(const dl_termination_record *record,
     return 0;
 }
 
+static int ensure_linger_directory(void)
+{
+    int parent = -1, child = -1, r = 0;
+    struct stat st;
+
+    parent = open(DL_TERMINATION_STATE_PARENT,
+                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (parent < 0) return -errno;
+    if (fstat(parent, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        st.st_uid != 0 || (st.st_mode & 0022) != 0) {
+        close(parent);
+        return -EPERM;
+    }
+    if (mkdirat(parent, "linger", 0755) != 0 && errno != EEXIST) {
+        r = -errno;
+        close(parent);
+        return r;
+    }
+    child = openat(parent, "linger",
+                   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (child < 0) {
+        r = -errno;
+        close(parent);
+        return r;
+    }
+    if (fstat(child, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        st.st_uid != 0 || (st.st_mode & 0022) != 0)
+        r = -EPERM;
+    close(child);
+    close(parent);
+    return r;
+}
+
 static int termination_recover_all(struct dbus_context *ctx)
 {
     struct termination_recovery_context recovery;
@@ -1646,15 +1679,10 @@ static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
         }
     }
     if (geteuid() == 0) {
-        struct stat linger_st;
-        if (mkdir(ctx->runtime_paths.linger_directory, 0755) != 0 && errno != EEXIST) {
-            fprintf(stderr, "dinit-logind: persistent linger storage unavailable (%s)\\n",
-                    strerror(errno));
-        } else if (lstat(ctx->runtime_paths.linger_directory, &linger_st) != 0 ||
-                   !S_ISDIR(linger_st.st_mode) || linger_st.st_uid != 0 ||
-                   (linger_st.st_mode & 0022) != 0) {
-            fprintf(stderr, "dinit-logind: refusing unsafe linger state directory\\n");
-        }
+        r = ensure_linger_directory();
+        if (r < 0)
+            fprintf(stderr, "dinit-logind: persistent linger storage unavailable or unsafe (%s)\\n",
+                    strerror(-r));
     }
     r = sd_bus_request_name(dbus->bus, DL_LOGIN1_NAME, 0);
     if (r < 0) {
