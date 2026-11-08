@@ -77,6 +77,7 @@ struct dbus_context {
 
 static int session_from_message(sd_bus_message *m, struct dbus_context *ctx,
                                 dl_session **ret_session);
+static int path_for_user(uint32_t uid, char *path, size_t size);
 
 struct termination_payload {
     dl_linux_cgroup_v2_session cgroup;
@@ -162,11 +163,6 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
                     "Unable to update the user state");
                 (void)sd_bus_reply_method_error(pending->request, &error);
             } else {
-                char user_path[256];
-                if (path_for_user(pending->user_uid, user_path,
-                                  sizeof(user_path)) == 0)
-                    (void)sd_bus_emit_properties_changed(ctx->bus, user_path,
-                        "org.freedesktop.login1.User", "Linger", "State", NULL);
                 (void)sd_bus_reply_method_return(pending->request, "");
             }
         }
@@ -428,6 +424,7 @@ static int method_set_user_linger(sd_bus_message *m, void *userdata,
     struct dbus_context *ctx = userdata;
     struct pending_authorization *pending = NULL;
     sd_bus_message *call = NULL;
+    const char *sender;
     uint32_t uid;
     int enable, interactive, r;
 
@@ -442,6 +439,10 @@ static int method_set_user_linger(sd_bus_message *m, void *userdata,
     if (uid == 0)
         return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.InvalidArgs",
                                       "Linger for the root user is not supported");
+    sender = sd_bus_message_get_sender(m);
+    if (!sender || sender[0] != ':')
+        return sd_bus_error_set_const(error, "org.freedesktop.DBus.Error.AccessDenied",
+                                      "A unique D-Bus sender is required for authorization");
 
     pending = calloc(1, sizeof(*pending));
     if (!pending)
@@ -463,7 +464,7 @@ static int method_set_user_linger(sd_bus_message *m, void *userdata,
     if (r >= 0) r = sd_bus_message_append(call, "s", "system-bus-name");
     if (r >= 0) r = sd_bus_message_open_container(call, 'a', "{sv}");
     if (r >= 0) r = sd_bus_message_append(call, "{sv}", "name", "s",
-                                           sd_bus_message_get_sender(m));
+                                           sender);
     if (r >= 0) r = sd_bus_message_close_container(call);
     if (r >= 0) r = sd_bus_message_close_container(call);
     if (r >= 0) r = sd_bus_message_append(call, "s",
@@ -1609,7 +1610,7 @@ static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
         sd_bus_unref(dbus->bus); dbus->bus = NULL; free(ctx); return r;
     }
     ctx->bus = dbus->bus;
-    if (mkdir(DL_TERMINATION_STATE_PARENT, 0700) != 0 && errno != EEXIST) {
+    if (mkdir(DL_TERMINATION_STATE_PARENT, 0755) != 0 && errno != EEXIST) {
         fprintf(stderr,
             "dinit-logind: durable termination journal unavailable (%s); Terminate disabled\n",
             strerror(errno));
@@ -1631,6 +1632,17 @@ static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
                 ctx->termination_store_open = true;
                 (void)termination_recover_all(ctx);
             }
+        }
+    }
+    if (geteuid() == 0) {
+        struct stat linger_st;
+        if (mkdir(ctx->runtime_paths.linger_directory, 0755) != 0 && errno != EEXIST) {
+            fprintf(stderr, "dinit-logind: persistent linger storage unavailable (%s)\\n",
+                    strerror(errno));
+        } else if (lstat(ctx->runtime_paths.linger_directory, &linger_st) != 0 ||
+                   !S_ISDIR(linger_st.st_mode) || linger_st.st_uid != 0 ||
+                   (linger_st.st_mode & 0022) != 0) {
+            fprintf(stderr, "dinit-logind: refusing unsafe linger state directory\\n");
         }
     }
     r = sd_bus_request_name(dbus->bus, DL_LOGIN1_NAME, 0);
