@@ -1124,6 +1124,11 @@ static int termination_recover_record(const dl_termination_record *record,
         dl_linux_cgroup_v2_session_release(&cgroup);
         return -ERANGE;
     }
+    if (strnlen(record->session_id, sizeof(payload->session_id)) >=
+        sizeof(payload->session_id)) {
+        dl_linux_cgroup_v2_session_release(&cgroup);
+        return -EBADMSG;
+    }
     payload = calloc(1, sizeof(*payload));
     if (!payload) {
         dl_linux_cgroup_v2_session_release(&cgroup);
@@ -1131,8 +1136,8 @@ static int termination_recover_record(const dl_termination_record *record,
     }
     payload->cgroup = cgroup;
     payload->store = &ctx->termination_store;
-    (void)snprintf(payload->session_id, sizeof(payload->session_id), "%s",
-                   record->session_id);
+    memcpy(payload->session_id, record->session_id,
+           strlen(record->session_id) + 1);
     cgroup.fd = -1;
     cgroup.parent_fd = -1;
     cgroup.name[0] = '\0';
