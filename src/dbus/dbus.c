@@ -1168,10 +1168,10 @@ static int termination_recover_all(struct dbus_context *ctx)
     int r;
 
     if (!ctx || !ctx->termination_store_open) return -EINVAL;
-    if (mkdir(DL_TERMINATION_STATE_PARENT, 0700) != 0 && errno != EEXIST)
+    if (mkdir(DL_TERMINATION_STATE_PARENT, 0755) != 0 && errno != EEXIST)
         return -errno;
     if (lstat(DL_TERMINATION_STATE_PARENT, &st) != 0) return -errno;
-    if (!S_ISDIR(st.st_mode) || st.st_uid != 0 || (st.st_mode & 0077) != 0)
+    if (!S_ISDIR(st.st_mode) || st.st_uid != 0 || (st.st_mode & 0022) != 0)
         return -EPERM;
     r = dl_linux_cgroup_v2_open_current(&parent);
     if (r < 0) {
@@ -1264,7 +1264,7 @@ static int dl_dbus_open_internal(dl_dbus *dbus, dl_manager *manager,
         struct stat state_parent;
         if (lstat(DL_TERMINATION_STATE_PARENT, &state_parent) != 0 ||
             !S_ISDIR(state_parent.st_mode) || state_parent.st_uid != 0 ||
-            (state_parent.st_mode & 0077) != 0) {
+            (state_parent.st_mode & 0022) != 0) {
             fprintf(stderr,
                 "dinit-logind: unsafe termination state directory; Terminate disabled\n");
         } else {
