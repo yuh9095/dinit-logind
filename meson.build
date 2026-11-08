@@ -23,6 +23,13 @@ linux_identity_lib = static_library(
   install: false,
 )
 
+termination_lib = static_library(
+  'dinit-logind-termination',
+  'src/session/termination.c',
+  include_directories: include_directories('src/session'),
+  install: false,
+)
+
 linux_cgroup_v2_lib = static_library(
   'dinit-logind-linux-cgroup-v2',
   'src/platform/linux/cgroup_v2.c',
@@ -76,7 +83,7 @@ linux_pam_ingress_lib = static_library(
   install: false,
 )
 
-termination_lib = static_library(\n  'dinit-logind-termination',\n  'src/session/termination.c',\n  include_directories: include_directories('src/session'),\n  install: false,\n)\n\nruntime_lib = static_library(
+runtime_lib = static_library(
   'dinit-logind-runtime',
   'src/runtime/runtime.c',
   include_directories: include_directories('src/core', 'src/runtime'),
