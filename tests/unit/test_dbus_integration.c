@@ -404,8 +404,15 @@ int main(void)
         }
         /* The descriptor read from an sd-bus message is borrowed from that
          * message; keep our own copy after releasing the reply. */
-        inhibitor_fd = fcntl(inhibitor_fd, F_DUPFD_CLOEXEC, 3);
-        if (inhibitor_fd < 0) goto stop_server;
+        {
+            int received_fd = inhibitor_fd;
+            inhibitor_fd = fcntl(received_fd, F_DUPFD_CLOEXEC, 3);
+            if (inhibitor_fd < 0) {
+                fprintf(stderr, "Inhibit FD duplication failed: received=%d errno=%d (%s)\n",
+                        received_fd, errno, strerror(errno));
+                goto stop_server;
+            }
+        }
         sd_bus_message_unref(reply);
         reply = NULL;
 
