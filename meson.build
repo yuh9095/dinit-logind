@@ -127,6 +127,10 @@ if pam_dep.found()
   )
 endif
 
+install_data('data/org.freedesktop.login1.policy',
+  install_dir: get_option('datadir') / 'polkit-1/actions',
+)
+
 subdir('tests/unit')
 
 test('daemon version output', daemon_exe, args: ['--version'])
