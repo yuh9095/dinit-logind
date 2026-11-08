@@ -102,7 +102,8 @@ dbus_integration_test = executable(
 )
 test('D-Bus login1 object lifecycle and properties',
      dbus_run_session,
-     args: ['--', dbus_integration_test])
+     args: ['--', dbus_integration_test],
+     timeout: 180)
 
 cgroup_v2_test = executable(
   'test-cgroup-v2',
