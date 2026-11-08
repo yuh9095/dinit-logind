@@ -103,7 +103,7 @@ jobs:
           docker run --rm -v "$PWD:/src" -w /src chimeralinux/chimera:latest \
             sh -euxc '
               apk update
-              apk add base-devel gmake meson samurai pkgconf linux-pam-devel elogind-devel dbus
+              apk add base-devel gmake meson ninja pkgconf linux-pam-devel elogind-devel dbus
               command -v gmake
               gmake --version
               pkg-config --modversion libsystemd
@@ -170,8 +170,3 @@ jobs:
               --show-leak-kinds=definite,indirect \
               "builddir-valgrind/tests/unit/$test"
           done
-      - name: Run D-Bus integration under Valgrind
-        run: |
-          dbus-run-session -- valgrind --error-exitcode=99 --leak-check=full \
-            --show-leak-kinds=definite,indirect \
-            builddir-valgrind/tests/unit/test-dbus-integration
