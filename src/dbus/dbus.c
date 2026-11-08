@@ -49,6 +49,7 @@ struct pending_authorization {
 struct inhibitor_record {
     int write_fd;
     uint32_t uid;
+    uint32_t pid;
     char what[DL_METADATA_MAX];
     char who[DL_METADATA_MAX];
     char why[DL_METADATA_MAX];
@@ -482,6 +483,7 @@ static int method_inhibit(sd_bus_message *m, void *userdata,
     sd_bus_creds *creds = NULL;
     const char *what, *who, *why, *mode;
     uid_t uid;
+    pid_t pid;
     int fds[2] = {-1, -1};
     int r;
 
@@ -496,12 +498,13 @@ static int method_inhibit(sd_bus_message *m, void *userdata,
             "org.freedesktop.DBus.Error.InvalidArgs",
             "Inhibit requires bounded what/who/why strings and block or delay mode");
 
-    r = sd_bus_query_sender_creds(m, SD_BUS_CREDS_EUID, &creds);
+    r = sd_bus_query_sender_creds(m, SD_BUS_CREDS_EUID | SD_BUS_CREDS_PID, &creds);
     if (r < 0)
         return sd_bus_error_set_const(error,
             "org.freedesktop.DBus.Error.AccessDenied",
             "Unable to determine inhibitor owner credentials");
     r = sd_bus_creds_get_euid(creds, &uid);
+    if (r >= 0) r = sd_bus_creds_get_pid(creds, &pid);
     sd_bus_creds_unref(creds);
     if (r < 0)
         return sd_bus_error_set_const(error,
@@ -521,6 +524,7 @@ static int method_inhibit(sd_bus_message *m, void *userdata,
     }
     record->write_fd = fds[1];
     record->uid = (uint32_t)uid;
+    record->pid = (uint32_t)pid;
     (void)snprintf(record->what, sizeof(record->what), "%s", what);
     (void)snprintf(record->who, sizeof(record->who), "%s", who);
     (void)snprintf(record->why, sizeof(record->why), "%s", why);
@@ -549,10 +553,10 @@ static int method_list_inhibitors(sd_bus_message *m, void *userdata,
     inhibitors_reap(ctx);
     r = sd_bus_message_new_method_return(m, &reply);
     if (r < 0) return r;
-    r = sd_bus_message_open_container(reply, 'a', "(ssssu)");
+    r = sd_bus_message_open_container(reply, 'a', "(ssssuu)");
     for (record = ctx->inhibitors; r >= 0 && record; record = record->next)
-        r = sd_bus_message_append(reply, "(ssssu)", record->what, record->who,
-                                  record->why, record->mode, record->uid);
+        r = sd_bus_message_append(reply, "(ssssuu)", record->what, record->who,
+                                  record->why, record->mode, record->uid, record->pid);
     if (r >= 0) r = sd_bus_message_close_container(reply);
     if (r >= 0) r = sd_bus_send(sd_bus_message_get_bus(m), reply, NULL);
     sd_bus_message_unref(reply);
@@ -1197,7 +1201,7 @@ static const sd_bus_vtable manager_vtable[] = {
     SD_BUS_METHOD("GetUserByPID", "u", "o", method_get_user_by_pid, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("GetSeat", "s", "o", method_get_seat, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("Inhibit", "ssss", "h", method_inhibit, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("ListInhibitors", "", "a(ssssu)", method_list_inhibitors, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("ListInhibitors", "", "a(ssssuu)", method_list_inhibitors, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("ListSessions", "", "a(susso)", method_list_sessions, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("ListUsers", "", "a(uso)", method_list_users, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("ListSeats", "", "a(so)", method_list_seats, SD_BUS_VTABLE_UNPRIVILEGED),
