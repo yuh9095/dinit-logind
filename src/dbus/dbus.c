@@ -6,6 +6,9 @@
 #include "../platform/linux/process_identity.h"
 #include "../platform/linux/cgroup_v2.h"
 #include "../session/termination.h"
+#include "../session/termination_store.h"
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <signal.h>
 #include <errno.h>
 #include <pwd.h>
@@ -48,13 +51,22 @@ struct dbus_context {
     struct pending_authorization *pending;
     dl_termination_queue terminations;
     uint32_t terminate_timeout_sec;
+    dl_termination_store termination_store;
+    bool termination_store_open;
 };
 
 static int session_from_message(sd_bus_message *m, struct dbus_context *ctx,
                                 dl_session **ret_session);
 
+struct termination_payload {
+    dl_linux_cgroup_v2_session cgroup;
+    dl_termination_store *store;
+    char session_id[DL_SESSION_ID_MAX];
+};
+
 static int termination_cgroup_kill(void *payload);
 static void termination_cgroup_release(void *payload);
+static int termination_recover_all(struct dbus_context *ctx);
 
 static void pending_authorization_remove(struct pending_authorization *pending)
 {
@@ -119,8 +131,12 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
     case SESSION_OP_TERMINATE: {
         dl_linux_cgroup_v2 parent = {-1, {0}};
         dl_linux_cgroup_v2_session cgroup_session = {-1, -1, {0}};
-        dl_linux_cgroup_v2_session *payload = NULL;
+        struct termination_payload *payload = NULL;
+        dl_termination_record record;
         dl_process_identity leader = dl_session_leader(session);
+        struct stat parent_st, child_st;
+        struct timespec deadline;
+        char boot_id[DL_TERMINATION_BOOT_ID_MAX];
 
         if (dl_session_is_stopping(session) ||
             dl_termination_queue_contains(&ctx->terminations,
@@ -128,61 +144,98 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
             r = 0;
             break;
         }
+        if (!ctx->termination_store_open) { r = -EIO; break; }
         r = dl_linux_cgroup_v2_open_current(&parent);
-        if (r < 0) {
-            r = -ENOTSUP;
-            break;
-        }
+        if (r < 0) { r = -ENOTSUP; break; }
         r = dl_linux_cgroup_v2_session_open(
             &parent, pending->session_id, &leader, &cgroup_session);
         if (r == 0)
             r = dl_linux_cgroup_v2_session_kill_all_available(&cgroup_session);
+        if (r == 0 && (fstat(parent.fd, &parent_st) != 0 ||
+                       fstat(cgroup_session.fd, &child_st) != 0))
+            r = -errno;
+        if (r == 0 && clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+            r = -errno;
+        if (r == 0 && (uint64_t)deadline.tv_sec >
+                      UINT64_MAX - ctx->terminate_timeout_sec)
+            r = -EOVERFLOW;
         if (r == 0) {
-            payload = malloc(sizeof(*payload));
+            deadline.tv_sec += (time_t)ctx->terminate_timeout_sec;
+            if (deadline.tv_sec < 0) r = -EOVERFLOW;
+        }
+        if (r == 0) r = dl_termination_store_read_boot_id(boot_id);
+        if (r == 0) {
+            memset(&record, 0, sizeof(record));
+            (void)snprintf(record.session_id, sizeof(record.session_id), "%s",
+                           pending->session_id);
+            (void)snprintf(record.boot_id, sizeof(record.boot_id), "%s", boot_id);
+            (void)snprintf(record.cgroup_name, sizeof(record.cgroup_name), "%s",
+                           cgroup_session.name);
+            record.deadline_sec = (uint64_t)deadline.tv_sec;
+            record.deadline_nsec = (uint32_t)deadline.tv_nsec;
+            record.parent_dev = (uint64_t)parent_st.st_dev;
+            record.parent_ino = (uint64_t)parent_st.st_ino;
+            record.cgroup_dev = (uint64_t)child_st.st_dev;
+            record.cgroup_ino = (uint64_t)child_st.st_ino;
+            record.leader_pid = leader.pid;
+            record.leader_start_time = leader.process_start_time;
+            record.pid_namespace_inode = leader.pid_namespace_inode;
+            /* Durable intent must reach stable storage before signals/ack. */
+            r = dl_termination_store_put(&ctx->termination_store, &record);
+        }
+        if (r == 0) {
+            payload = calloc(1, sizeof(*payload));
             if (!payload) r = -ENOMEM;
             else {
-                *payload = cgroup_session;
+                payload->cgroup = cgroup_session;
+                payload->store = &ctx->termination_store;
+                (void)snprintf(payload->session_id, sizeof(payload->session_id),
+                               "%s", pending->session_id);
                 cgroup_session.fd = -1;
                 cgroup_session.parent_fd = -1;
                 cgroup_session.name[0] = '\0';
             }
         }
         if (r == 0) {
-            r = dl_termination_queue_schedule(
-                &ctx->terminations, pending->session_id, payload,
+            r = dl_termination_queue_schedule_at(
+                &ctx->terminations, pending->session_id, &deadline, payload,
                 termination_cgroup_kill, termination_cgroup_release);
             if (r == 0) {
-                dl_linux_cgroup_v2_session *queued_payload = payload;
-                int signal_result;
+                struct termination_payload *queued_payload = payload;
+                int term_result, cont_result, hup_result;
                 payload = NULL;
                 if (dl_session_begin_stop(ctx->manager,
                                           pending->session_id) != DL_OK) {
-                    fprintf(stderr,
-                        "dinit-logind: session %s disappeared while scheduling termination\\n",
-                        pending->session_id);
                     r = -ESTALE;
+                    (void)dl_termination_store_remove(&ctx->termination_store,
+                                                      pending->session_id);
                 } else {
-                    int term_result, cont_result, hup_result;
-                    /* Match the login session scope policy: TERM, CONT, HUP. */
                     term_result = dl_linux_cgroup_v2_session_signal_all(
-                        queued_payload, SIGTERM);
+                        &queued_payload->cgroup, SIGTERM);
                     cont_result = dl_linux_cgroup_v2_session_signal_all(
-                        queued_payload, SIGCONT);
+                        &queued_payload->cgroup, SIGCONT);
                     hup_result = dl_linux_cgroup_v2_session_signal_all(
-                        queued_payload, SIGHUP);
-                    signal_result = term_result < 0 ? term_result :
-                                    cont_result < 0 ? cont_result : hup_result;
-                    if (signal_result < 0) {
+                        &queued_payload->cgroup, SIGHUP);
+                    if (term_result < 0 || cont_result < 0 || hup_result < 0) {
                         fprintf(stderr,
-                            "dinit-logind: initial session signals for %s failed "
-                            "(TERM=%d CONT=%d HUP=%d); retaining deferred SIGKILL\\n",
+                            "dinit-logind: initial signals for %s failed "
+                            "(TERM=%d CONT=%d HUP=%d); retaining durable SIGKILL\n",
                             pending->session_id, term_result, cont_result, hup_result);
-                        r = signal_result;
+                        r = term_result < 0 ? term_result :
+                            cont_result < 0 ? cont_result : hup_result;
                     }
                 }
             }
         }
-        if (payload) termination_cgroup_release(payload);
+        if (payload) {
+            (void)dl_termination_store_remove(&ctx->termination_store,
+                                             pending->session_id);
+            termination_cgroup_release(payload);
+        } else if (r < 0 && dl_termination_queue_contains(
+                       &ctx->terminations, pending->session_id) &&
+                   !dl_session_is_stopping(session)) {
+            /* Queue owns the payload; preserve its durable record. */
+        }
         dl_linux_cgroup_v2_session_release(&cgroup_session);
         dl_linux_cgroup_v2_close(&parent);
         if (r == -ENOENT || r == -ENODEV || r == -EACCES ||
@@ -314,18 +367,23 @@ static void pending_authorizations_cancel(struct dbus_context *ctx)
     }
 }
 
-static int termination_cgroup_kill(void *payload)
+static int termination_cgroup_kill(void *userdata)
 {
-    return dl_linux_cgroup_v2_session_kill_all(
-        (const dl_linux_cgroup_v2_session *)payload);
+    struct termination_payload *payload = userdata;
+    int r;
+    if (!payload) return -EINVAL;
+    r = dl_linux_cgroup_v2_session_kill_all(&payload->cgroup);
+    if (r == 0 && payload->store)
+        r = dl_termination_store_remove(payload->store, payload->session_id);
+    return r;
 }
 
-static void termination_cgroup_release(void *payload)
+static void termination_cgroup_release(void *userdata)
 {
-    dl_linux_cgroup_v2_session *session = payload;
-    if (!session) return;
-    dl_linux_cgroup_v2_session_release(session);
-    free(session);
+    struct termination_payload *payload = userdata;
+    if (!payload) return;
+    dl_linux_cgroup_v2_session_release(&payload->cgroup);
+    free(payload);
 }
 
 static int make_object_path(const char *kind, const char *id,
