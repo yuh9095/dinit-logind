@@ -668,11 +668,14 @@ int main(void)
                 goto stop_server;
             child_pid = -1;
 
-            /* Once the grace-period kill has completed, Terminate remains
-             * idempotent until the Session itself is closed. */
+            /* Once the Core Session is closed, its D-Bus object must no
+             * longer be callable. Idempotence applies only while it exists. */
             r = sd_bus_call_method(client, LOGIN1_NAME, child_path,
                 SESSION_IFACE, "Terminate", &error, &reply, "");
-            if (r < 0) goto stop_server;
+            if (r >= 0 || !sd_bus_error_has_name(&error,
+                    "org.freedesktop.DBus.Error.UnknownObject"))
+                goto stop_server;
+            sd_bus_error_free(&error);
             sd_bus_message_unref(reply);
             reply = NULL;
         } else {
