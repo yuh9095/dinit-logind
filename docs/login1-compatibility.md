@@ -8,6 +8,20 @@ The primary behavioral/API reference is systemd v262.2. The implementation must 
 
 For every exported interface, audit and test object paths, interface names, method signatures, argument validation, return values, property types/defaults/change notifications, signals and ordering, D-Bus error names, peer credentials, Polkit actions, object lifetimes, and behavior when optional hardware/kernel facilities are absent.
 
+## Implemented compatibility slices
+
+### Inhibitor registration and reporting
+
+The current implementation provides:
+
+- `Inhibit(what, who, why, mode) -> h` using a pipe descriptor whose open lifetime represents the lock.
+- `ListInhibitors() -> a(ssssuu)`, including the effective UID and PID of the D-Bus caller.
+- `BlockInhibited`, `DelayInhibited`, `NCurrentInhibitors`, and `InhibitDelayMaxUSec`.
+- Property-change notifications when inhibitors are registered or reaped.
+- A bounded in-memory inhibitor table. Closing the final client copy releases the inhibitor.
+
+This is not yet full inhibitor orchestration. In particular, delay locks are reported but are not yet awaited by shutdown/sleep transitions, and power/sleep actions do not yet emit the prepare signals or consult the inhibitor table. Do not advertise these parts as complete until the orchestration and timeout behavior have tests.
+
 ## Manager API inventory
 
 Groups in scope for audit and staged implementation:
