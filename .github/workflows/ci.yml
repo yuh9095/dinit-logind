@@ -103,11 +103,11 @@ jobs:
           docker run --rm -v "$PWD:/src" -w /src chimeralinux/chimera:latest \
             sh -euxc '
               apk update
-              apk add base-devel gmake meson ninja pkgconf linux-pam-devel elogind-devel dbus
+              apk add base-devel gmake meson ninja pkgconf clang lld linux-pam-devel elogind-devel dbus
               command -v gmake
               gmake --version
               pkg-config --modversion libsystemd
-              meson setup builddir-chimera
+              CC=clang meson setup builddir-chimera
               meson compile -C builddir-chimera
               meson test -C builddir-chimera --print-errorlogs
               builddir-chimera/dinit-logind --version
