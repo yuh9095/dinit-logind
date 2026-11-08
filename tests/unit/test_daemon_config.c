@@ -83,7 +83,7 @@ static void test_invalid_terminate_timeout_rejected(void)
     dl_daemon_config config;
     assert(fd >= 0);
     assert(fchmod(fd, 0600) == 0);
-    write_all(fd, "session_terminate_timeout_sec = 0\\n");
+    write_all(fd, "session_terminate_timeout_sec = 0\n");
     assert(close(fd) == 0);
     dl_daemon_config_defaults(&config);
     if (geteuid() == 0) {
