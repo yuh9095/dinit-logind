@@ -15,9 +15,8 @@ struct fake_payload {
 static struct timespec fake_now = {100, 0};
 static int clock_error;
 
-static int fake_clock(clockid_t id, struct timespec *now)
+static int fake_clock(struct timespec *now)
 {
-    (void)id;
     if (clock_error) { errno = clock_error; return -1; }
     *now = fake_now;
     return 0;
