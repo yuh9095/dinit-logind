@@ -23,10 +23,7 @@ jobs:
       - name: Compile
         run: meson compile -C builddir
       - name: Run tests
-        # The login daemon is root-owned and its durable termination journal
-        # deliberately rejects non-root state directories. Run integration
-        # tests as root so the Terminate path is exercised, not skipped.
-        run: sudo meson test -C builddir --print-errorlogs
+        run: meson test -C builddir --print-errorlogs
       - name: Check daemon CLI
         run: |
           builddir/dinit-logind --version

@@ -145,7 +145,7 @@ static int session_authorization_reply(sd_bus_message *reply, void *userdata,
             r = 0;
             break;
         }
-        if (!ctx->termination_store_open) { r = -EIO; break; }
+        if (!ctx->termination_store_open) { r = -ENOTSUP; break; }
         r = dl_linux_cgroup_v2_open_current(&parent);
         if (r < 0) { r = -ENOTSUP; break; }
         r = dl_linux_cgroup_v2_session_open(
