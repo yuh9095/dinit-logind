@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "../../src/dbus/dbus.h"
 #include "../../src/platform/linux/process_identity.h"
+#include "../../src/platform/linux/cgroup_v2.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -14,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 
 #define LOGIN1_NAME "org.freedesktop.login1"
 #define LOGIN1_PATH "/org/freedesktop/login1"
@@ -203,6 +205,8 @@ int main(void)
         fprintf(stderr, "cannot open test bus: %s\n", strerror(-r));
         goto finish;
     }
+    /* Keep the real cgroup termination integration test short. */
+    if (dl_dbus_set_terminate_timeout(&dbus, 1) < 0) goto finish;
     stage = 2;
     if (open_client(&client, address) < 0) goto finish;
     /* The authority uses its own connection so it can answer while the test
@@ -558,6 +562,107 @@ int main(void)
     r = dl_session_close(manager, dl_session_id(child_session));
     pthread_mutex_unlock(&server.lock);
     if (r != DL_OK) goto stop_server;
+
+    /*
+     * Positive asynchronous Terminate coverage. This only runs when the
+     * host delegates a writable cgroup-v2 subtree with cgroup.kill.
+     */
+    {
+        dl_linux_cgroup_v2 parent = {-1, {0}};
+        dl_linux_cgroup_v2_session cgroup_session = {-1, -1, {0}};
+        struct timespec deadline, pause_time = {0, 10000000L};
+        int cr;
+
+        stage = 191;
+        child_pid = fork();
+        if (child_pid < 0) goto stop_server;
+        if (child_pid == 0) {
+            (void)signal(SIGTERM, SIG_IGN);
+            for (;;) pause();
+        }
+        memset(&child_spec, 0, sizeof(child_spec));
+        child_spec.uid = (uint32_t)getuid();
+        if (dl_linux_process_identity_read((uint32_t)child_pid,
+                                           &child_spec.leader) != DL_OK)
+            goto stop_server;
+        child_spec.service = "test-terminate-async";
+        child_spec.type = "tty";
+        child_spec.session_class = "user";
+        pthread_mutex_lock(&server.lock);
+        r = dl_session_create(manager, &child_spec, &child_session);
+        pthread_mutex_unlock(&server.lock);
+        if (r != DL_OK) goto stop_server;
+
+        cr = dl_linux_cgroup_v2_open_current(&parent);
+        if (cr == 0)
+            cr = dl_linux_cgroup_v2_session_create(
+                &parent, dl_session_id(child_session),
+                &child_spec.leader, &cgroup_session);
+        if (cr == 0)
+            cr = dl_linux_cgroup_v2_session_kill_all_available(&cgroup_session);
+        if (cr == 0) {
+            r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH,
+                MANAGER_IFACE, "GetSession", &error, &reply, "s",
+                dl_session_id(child_session));
+            if (r < 0 || sd_bus_message_read(reply, "o", &returned_path) < 0)
+                goto stop_server;
+            (void)snprintf(child_path, sizeof(child_path), "%s", returned_path);
+            sd_bus_message_unref(reply);
+            reply = NULL;
+
+            r = sd_bus_call_method(client, LOGIN1_NAME, child_path,
+                SESSION_IFACE, "Terminate", &error, &reply, "");
+            if (r < 0) goto stop_server;
+            sd_bus_message_unref(reply);
+            reply = NULL;
+
+            /* The pending operation must survive core Session teardown. */
+            pthread_mutex_lock(&server.lock);
+            r = dl_session_close(manager, dl_session_id(child_session));
+            pthread_mutex_unlock(&server.lock);
+            if (r != DL_OK) goto stop_server;
+            child_session = NULL;
+
+            if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+                goto stop_server;
+            deadline.tv_sec += 5;
+            for (;;) {
+                pid_t waited = waitpid(child_pid, &child_status, WNOHANG);
+                if (waited == child_pid) break;
+                if (waited < 0 && errno != EINTR) goto stop_server;
+                {
+                    struct timespec now;
+                    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+                        goto stop_server;
+                    if (now.tv_sec > deadline.tv_sec ||
+                        (now.tv_sec == deadline.tv_sec &&
+                         now.tv_nsec >= deadline.tv_nsec))
+                        goto stop_server;
+                }
+                (void)nanosleep(&pause_time, NULL);
+            }
+            if (!WIFSIGNALED(child_status) || WTERMSIG(child_status) != SIGKILL)
+                goto stop_server;
+            child_pid = -1;
+        } else {
+            fprintf(stderr,
+                "Skipping positive Terminate integration: writable delegated "
+                "cgroup.kill unavailable (%d)\n", cr);
+            (void)kill(child_pid, SIGKILL);
+            (void)waitpid(child_pid, &child_status, 0);
+            child_pid = -1;
+            pthread_mutex_lock(&server.lock);
+            r = dl_session_close(manager, dl_session_id(child_session));
+            pthread_mutex_unlock(&server.lock);
+            if (r != DL_OK) goto stop_server;
+            child_session = NULL;
+        }
+        if (cgroup_session.fd >= 0) {
+            if (dl_linux_cgroup_v2_session_close(&cgroup_session) != 0)
+                dl_linux_cgroup_v2_session_release(&cgroup_session);
+        }
+        dl_linux_cgroup_v2_close(&parent);
+    }
 
     /* A vanished authority must fail closed rather than falling back to
      * session-owner or root checks. */
