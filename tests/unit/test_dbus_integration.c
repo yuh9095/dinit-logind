@@ -422,6 +422,19 @@ int main(void)
             goto stop_server;
         sd_bus_message_unref(reply);
         reply = NULL;
+        {
+            uint64_t current = 0;
+            char *inhibited = NULL;
+            r = sd_bus_get_property_trivial(client, LOGIN1_NAME, LOGIN1_PATH,
+                MANAGER_IFACE, "NCurrentInhibitors", &error, 't', &current);
+            if (r < 0 || current != 1) goto stop_server;
+            r = sd_bus_get_property_string(client, LOGIN1_NAME, LOGIN1_PATH,
+                MANAGER_IFACE, "BlockInhibited", &error, &inhibited);
+            if (r < 0 || !inhibited || strcmp(inhibited, "sleep") != 0)
+                goto stop_server;
+            free(inhibited);
+            inhibited = NULL;
+        }
         if (close(inhibitor_fd) != 0) goto stop_server;
 
         /* dl_dbus_process reaps the server-side pipe after the client closes
@@ -435,6 +448,18 @@ int main(void)
             goto stop_server;
         sd_bus_message_unref(reply);
         reply = NULL;
+        {
+            uint64_t current = 1;
+            char *inhibited = NULL;
+            r = sd_bus_get_property_trivial(client, LOGIN1_NAME, LOGIN1_PATH,
+                MANAGER_IFACE, "NCurrentInhibitors", &error, 't', &current);
+            if (r < 0 || current != 0) goto stop_server;
+            r = sd_bus_get_property_string(client, LOGIN1_NAME, LOGIN1_PATH,
+                MANAGER_IFACE, "BlockInhibited", &error, &inhibited);
+            if (r < 0 || !inhibited || inhibited[0] != '\\0')
+                goto stop_server;
+            free(inhibited);
+        }
 
         r = sd_bus_call_method(client, LOGIN1_NAME, LOGIN1_PATH, MANAGER_IFACE,
             "Inhibit", &error, &reply, "ssss",
