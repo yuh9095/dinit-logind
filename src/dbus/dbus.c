@@ -1206,10 +1206,10 @@ static int fallback_object_find(sd_bus *bus, const char *path,
     return r < 0 ? r : 0;
 }
 
-static bool inhibitor_has_token(const char *what, const char *token,
-                                size_t token_len)
+static bool inhibitor_value_has_token(const char *value, const char *token,
+                                      size_t token_len)
 {
-    const char *p = what;
+    const char *p = value;
     while (p && *p) {
         const char *end = strchr(p, ':');
         size_t len = end ? (size_t)(end - p) : strlen(p);
@@ -1255,28 +1255,9 @@ static int manager_property(sd_bus *bus, const char *path,
         while (p && *p) {
             const char *end = strchr(p, ':');
             size_t len = end ? (size_t)(end - p) : strlen(p);
-            bool duplicate = false;
-            struct inhibitor_record *prior;
-            const char *q;
+            bool duplicate;
             if (len == 0) { p = end ? end + 1 : NULL; continue; }
-            for (prior = ctx->inhibitors; prior && prior != record;
-                 prior = prior->next) {
-                if ((strcmp(prior->mode, "delay") == 0) != delay) continue;
-                if (inhibitor_has_token(prior->what, p, len)) {
-                    duplicate = true;
-                    break;
-                }
-            }
-            /* Avoid repeating an earlier token in this same record. */
-            q = record->what;
-            while (!duplicate && q < p) {
-                const char *qend = strchr(q, ':');
-                size_t qlen = qend ? (size_t)(qend - q) : strlen(q);
-                if (qlen == len && memcmp(q, p, len) == 0)
-                    duplicate = true;
-                if (!qend || qend >= p) break;
-                q = qend + 1;
-            }
+            duplicate = inhibitor_value_has_token(value, p, len);
             if (!duplicate) {
                 if (used && used + 1 < sizeof(value)) value[used++] = ':';
                 if (len >= sizeof(value) - used) return -ENOBUFS;
