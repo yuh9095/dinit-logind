@@ -1055,6 +1055,7 @@ static int user_property(sd_bus *bus, const char *path, const char *interface,
     const dl_user *user;
     struct passwd pwd, *result = NULL;
     char scratch[16384];
+    bool linger_enabled;
     size_t i;
     int r;
     (void)bus; (void)interface;
@@ -1071,6 +1072,13 @@ static int user_property(sd_bus *bus, const char *path, const char *interface,
     user = dl_user_find(ctx->manager, (uint32_t)parsed);
     if (!user) return sd_bus_error_set_const(error, "org.freedesktop.login1.NoSuchUser",
                                               "User no longer exists");
+    linger_enabled = dl_user_linger_enabled(user);
+    {
+        bool persisted = false;
+        if (dl_runtime_get_linger(&ctx->runtime_paths, (uint32_t)parsed,
+                                  &persisted) == DL_OK)
+            linger_enabled = persisted;
+    }
     if (strcmp(property, "UID") == 0)
         return sd_bus_message_append(reply, "u", (uint32_t)parsed);
     if (strcmp(property, "GID") == 0) {
@@ -1093,13 +1101,13 @@ static int user_property(sd_bus *bus, const char *path, const char *interface,
     if (strcmp(property, "State") == 0) {
         const char *state = dl_user_active_session_count(user) ? "active" :
             dl_user_session_count(user) ? "online" :
-            dl_user_linger_enabled(user) ? "lingering" : "offline";
+            linger_enabled ? "lingering" : "offline";
         return sd_bus_message_append(reply, "s", state);
     }
     if (strcmp(property, "Display") == 0)
         return sd_bus_message_append(reply, "(so)", "", "/");
     if (strcmp(property, "Linger") == 0)
-        return sd_bus_message_append(reply, "b", dl_user_linger_enabled(user));
+        return sd_bus_message_append(reply, "b", linger_enabled);
     if (strcmp(property, "IdleHint") == 0)
         return sd_bus_message_append(reply, "b", 0);
     if (strcmp(property, "Sessions") == 0) {
