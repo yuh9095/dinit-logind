@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <signal.h>
+#include <poll.h>
 #include <errno.h>
 #include <pwd.h>
 #include <stdio.h>
@@ -45,6 +46,16 @@ struct pending_authorization {
     struct pending_authorization *next;
 };
 
+struct inhibitor_record {
+    int write_fd;
+    uint32_t uid;
+    char what[DL_METADATA_MAX];
+    char who[DL_METADATA_MAX];
+    char why[DL_METADATA_MAX];
+    char mode[16];
+    struct inhibitor_record *next;
+};
+
 struct dbus_context {
     dl_manager *manager;
     sd_bus *bus;
@@ -53,6 +64,7 @@ struct dbus_context {
     uint32_t terminate_timeout_sec;
     dl_termination_store termination_store;
     bool termination_store_open;
+    struct inhibitor_record *inhibitors;
 };
 
 static int session_from_message(sd_bus_message *m, struct dbus_context *ctx,
@@ -434,6 +446,122 @@ static int uid_to_name(uint32_t uid, char *name, size_t size)
 }
 
 static int path_for_user(uint32_t uid, char *path, size_t size);
+
+static void inhibitor_remove(struct dbus_context *ctx,
+                             struct inhibitor_record **link)
+{
+    struct inhibitor_record *record;
+    if (!ctx || !link || !*link) return;
+    record = *link;
+    *link = record->next;
+    if (record->write_fd >= 0) close(record->write_fd);
+    free(record);
+}
+
+/* The client owns the read end of a pipe; the daemon retains the write end.
+ * POLLERR on the write end means every client copy of the inhibitor FD closed. */
+static void inhibitors_reap(struct dbus_context *ctx)
+{
+    struct inhibitor_record **link;
+    if (!ctx) return;
+    for (link = &ctx->inhibitors; *link;) {
+        struct pollfd pfd = { .fd = (*link)->write_fd, .events = POLLERR | POLLHUP };
+        int r = poll(&pfd, 1, 0);
+        if (r > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)))
+            inhibitor_remove(ctx, link);
+        else
+            link = &(*link)->next;
+    }
+}
+
+static int method_inhibit(sd_bus_message *m, void *userdata,
+                          sd_bus_error *error)
+{
+    struct dbus_context *ctx = userdata;
+    struct inhibitor_record *record = NULL;
+    sd_bus_creds *creds = NULL;
+    const char *what, *who, *why, *mode;
+    uid_t uid;
+    int fds[2] = {-1, -1};
+    int r;
+
+    r = sd_bus_message_read(m, "ssss", &what, &who, &why, &mode);
+    if (r < 0) return r;
+    if (!what || !what[0] || !who || !who[0] || !why || !mode ||
+        (strcmp(mode, "block") != 0 && strcmp(mode, "delay") != 0) ||
+        strnlen(what, DL_METADATA_MAX) >= DL_METADATA_MAX ||
+        strnlen(who, DL_METADATA_MAX) >= DL_METADATA_MAX ||
+        strnlen(why, DL_METADATA_MAX) >= DL_METADATA_MAX)
+        return sd_bus_error_set_const(error,
+            "org.freedesktop.DBus.Error.InvalidArgs",
+            "Inhibit requires bounded what/who/why strings and block or delay mode");
+
+    r = sd_bus_query_sender_creds(m, SD_BUS_CREDS_EUID, &creds);
+    if (r < 0)
+        return sd_bus_error_set_const(error,
+            "org.freedesktop.DBus.Error.AccessDenied",
+            "Unable to determine inhibitor owner credentials");
+    r = sd_bus_creds_get_euid(creds, &uid);
+    sd_bus_creds_unref(creds);
+    if (r < 0)
+        return sd_bus_error_set_const(error,
+            "org.freedesktop.DBus.Error.AccessDenied",
+            "Unable to determine inhibitor owner credentials");
+
+    record = calloc(1, sizeof(*record));
+    if (!record)
+        return sd_bus_error_set_const(error,
+            "org.freedesktop.DBus.Error.NoMemory",
+            "Unable to allocate inhibitor record");
+    if (pipe2(fds, O_CLOEXEC | O_NONBLOCK) != 0) {
+        free(record);
+        return sd_bus_error_setf(error,
+            "org.freedesktop.login1.OperationFailed",
+            "Unable to create inhibitor descriptor: %s", strerror(errno));
+    }
+    record->write_fd = fds[1];
+    record->uid = (uint32_t)uid;
+    (void)snprintf(record->what, sizeof(record->what), "%s", what);
+    (void)snprintf(record->who, sizeof(record->who), "%s", who);
+    (void)snprintf(record->why, sizeof(record->why), "%s", why);
+    (void)snprintf(record->mode, sizeof(record->mode), "%s", mode);
+
+    r = sd_bus_reply_method_return(m, "h", fds[0]);
+    close(fds[0]);
+    if (r < 0) {
+        close(record->write_fd);
+        free(record);
+        return r;
+    }
+    record->next = ctx->inhibitors;
+    ctx->inhibitors = record;
+    return r;
+}
+
+static int method_list_inhibitors(sd_bus_message *m, void *userdata,
+                                  sd_bus_error *error)
+{
+    struct dbus_context *ctx = userdata;
+    struct inhibitor_record *record;
+    sd_bus_message *reply = NULL;
+    int r = sd_bus_message_new_method_return(m, &reply);
+    (void)error;
+    if (r < 0) return r;
+    r = sd_bus_message_open_container(reply, 'a', "(ssssu)");
+    for (record = ctx->inhibitors; r >= 0 && record; record = record->next)
+        r = sd_bus_message_append(reply, "(ssssu)", record->what, record->who,
+                                  record->why, record->mode, record->uid);
+    if (r >= 0) r = sd_bus_message_close_container(reply);
+    if (r >= 0) r = sd_bus_send(sd_bus_message_get_bus(m), reply, NULL);
+    sd_bus_message_unref(reply);
+    return r;
+}
+
+static void inhibitors_finish(struct dbus_context *ctx)
+{
+    while (ctx && ctx->inhibitors)
+        inhibitor_remove(ctx, &ctx->inhibitors);
+}
 
 static int method_get_session(sd_bus_message *m, void *userdata,
                               sd_bus_error *ret_error)
@@ -1066,6 +1194,8 @@ static const sd_bus_vtable manager_vtable[] = {
     SD_BUS_METHOD("GetUser", "u", "o", method_get_user, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("GetUserByPID", "u", "o", method_get_user_by_pid, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("GetSeat", "s", "o", method_get_seat, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("Inhibit", "ssss", "h", method_inhibit, SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_METHOD("ListInhibitors", "", "a(ssssu)", method_list_inhibitors, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("ListSessions", "", "a(susso)", method_list_sessions, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("ListUsers", "", "a(uso)", method_list_users, SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_METHOD("ListSeats", "", "a(so)", method_list_seats, SD_BUS_VTABLE_UNPRIVILEGED),
@@ -1485,10 +1615,11 @@ int dl_dbus_process(dl_dbus *dbus)
         r = sd_bus_process(dbus->bus, NULL);
     } while (r > 0);
     if (r < 0) return r;
-    r = process_core_events(dbus);
-    if (r < 0) return r;
     ctx = dbus->manager_slot ?
           sd_bus_slot_get_userdata(dbus->manager_slot) : NULL;
+    inhibitors_reap(ctx);
+    r = process_core_events(dbus);
+    if (r < 0) return r;
     return ctx ? dl_termination_queue_process(&ctx->terminations) : 0;
 }
 
@@ -1499,6 +1630,7 @@ void dl_dbus_close(dl_dbus *dbus)
     if (dbus->manager_slot) ctx = sd_bus_slot_get_userdata(dbus->manager_slot);
     if (ctx) dl_termination_queue_finish(&ctx->terminations);
     pending_authorizations_cancel(ctx);
+    inhibitors_finish(ctx);
     if (ctx && ctx->termination_store_open) {
         dl_termination_store_close(&ctx->termination_store);
         ctx->termination_store_open = false;
