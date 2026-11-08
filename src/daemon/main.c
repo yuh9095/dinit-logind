@@ -239,7 +239,7 @@ int main(int argc, char **argv)
     }
     if (dl_dbus_set_terminate_timeout(
             &dbus, config.session_terminate_timeout_sec) != 0) {
-        (void)fprintf(stderr, "dinit-logind: invalid session termination timeout\\n");
+        (void)fprintf(stderr, "dinit-logind: invalid session termination timeout\n");
         dl_dbus_close(&dbus);
         dl_manager_destroy(manager);
         dl_runtime_socket_close(&runtime);
